@@ -2,7 +2,7 @@
 name = "appkey"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.95"
 license = "MIT"
 repository = "https://github.com/carevski/appkey"
 description = "Global keyboard shortcuts that open an app, or focus it if it's already running."
@@ -11,9 +11,12 @@ publish = false
 [dependencies]
 anyhow = "1.0.104"
 dirs = "7.0.0"
+# Settings window. No bundled fonts (ui/font.rs loads the OS font, -1.4 MB);
+# glow (OpenGL) is much smaller than wgpu.
+eframe = { version = "0.36", default-features = false, features = ["accesskit", "glow", "x11", "wayland"] }
 global-hotkey = "0.8.0"
 serde = { version = "1.0.229", features = ["derive"] }
-toml = { version = "1.1.8", default-features = false, features = ["parse", "serde"] }
+toml = { version = "1.1.8", default-features = false, features = ["parse", "serde", "display"] }
 # Backends are picked per-OS below; default (GTK/libappindicator) is disabled on purpose.
 tray-icon = { version = "0.26.1", default-features = false }
 
@@ -21,16 +24,16 @@ tray-icon = { version = "0.26.1", default-features = false }
 [target.'cfg(any(target_os = "macos", windows))'.dependencies]
 tao = { version = "0.37.1", default-features = false }
 
-# Linux: pure Rust, no GTK. Hotkeys run on global-hotkey's own X11 thread; the tray
-# uses StatusNotifierItem over D-Bus (ksni). Keep x11rb on the same minor as global-hotkey.
+# Linux: no GTK. Hotkeys run on global-hotkey's own X11 thread; the tray uses
+# StatusNotifierItem over D-Bus (ksni). Keep x11rb on the same minor as global-hotkey.
 [target.'cfg(target_os = "linux")'.dependencies]
 tray-icon = { version = "0.26.1", default-features = false, features = ["ksni"] }
 x11rb = "0.13"
 
 # Already in the tree via tray-icon/tao; used to enumerate running apps.
 [target.'cfg(target_os = "macos")'.dependencies]
-objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSRunningApplication", "NSWorkspace"] }
-objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSArray", "NSString", "NSURL"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "libc", "NSRunningApplication", "NSWorkspace"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSArray", "NSBundle", "NSString", "NSURL"] }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62.2", features = [
@@ -68,8 +71,8 @@ maintainer = "Vladimir Carevski <carevski@gmail.com>"
 copyright = "Vladimir Carevski"
 section = "utils"
 priority = "optional"
-# Statically linked (musl) — no runtime dependencies.
-depends = ""
+# GUI libraries are loaded at runtime (dlopen), so list them explicitly.
+depends = "libc6 (>= 2.35), libx11-6, libxcursor1, libxrandr2, libxi6, libxkbcommon-x11-0, libgl1, libegl1"
 extended-description = """\
 Tray app that gives applications global keyboard shortcuts. Pressing a shortcut \
 focuses the app's most recently used window, or starts the app if it isn't running. \

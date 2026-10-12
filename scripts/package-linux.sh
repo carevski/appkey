@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
-# Build a static (musl) Linux binary that runs on any distro, then .deb, .rpm and .tar.gz.
+# Build the Linux binary, then .deb, .rpm and .tar.gz. Links against glibc (the settings
+# window loads X11/GL libraries at runtime, which a static musl binary can't), so build on
+# the oldest distro you want to support: CI uses Ubuntu 22.04 (glibc 2.35).
 # Needs: cargo-deb, cargo-generate-rpm. Usage: scripts/package-linux.sh <version>   → dist/
 set -euo pipefail
 version="${1:?usage: $0 <version>}"
-target="${TARGET:-x86_64-unknown-linux-musl}"
+target="${TARGET:-$(rustc -vV | sed -n "s/^host: //p")}"
 arch="${target%%-*}"
 cd "$(dirname "$0")/.."
 

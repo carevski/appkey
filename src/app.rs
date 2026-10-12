@@ -8,6 +8,8 @@
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::path::PathBuf;
+use std::process::Child;
+use std::time::{Duration, SystemTime};
 
 use anyhow::Result;
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
@@ -21,7 +23,12 @@ use crate::platform::{self, Outcome};
 pub enum Event {
     Hotkey(u32),
     Menu(MenuId),
+    /// Periodic: check whether the config file changed.
+    Tick,
 }
+
+/// How often the config file is checked for changes (e.g. saved by the settings window).
+const WATCH_INTERVAL: Duration = Duration::from_secs(1);
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Flow {
@@ -33,12 +40,17 @@ pub struct App {
     config_path: PathBuf,
     hotkeys: GlobalHotKeyManager,
     active: HashMap<u32, Shortcut>,
-    tray: TrayIcon,
+    /// `None` when the desktop has no tray (e.g. no `StatusNotifier` host): shortcuts still work.
+    tray: Option<TrayIcon>,
     menu: Menu,
     status: MenuItem,
+    settings: MenuId,
     edit: MenuId,
     reload: MenuId,
     quit: MenuId,
+    /// Modification time of the config we last loaded.
+    loaded_mtime: Option<SystemTime>,
+    settings_window: Option<Child>,
 }
 
 impl std::fmt::Debug for App {
@@ -51,12 +63,14 @@ impl App {
     pub fn new(config_path: PathBuf) -> Result<Self> {
         let hotkeys = GlobalHotKeyManager::new()?;
         let status = MenuItem::new("appkey", false, None);
-        let edit = MenuItem::new("Edit config…", true, None);
+        let settings = MenuItem::new("Settings…", true, None);
+        let edit = MenuItem::new("Edit config file…", true, None);
         let reload = MenuItem::new("Reload config", true, None);
         let quit = MenuItem::new("Quit appkey", true, None);
         let menu = Menu::with_items(&[
             &status,
             &PredefinedMenuItem::separator(),
+            &settings,
             &edit,
             &reload,
             &PredefinedMenuItem::separator(),
@@ -67,7 +81,12 @@ impl App {
         let tray = tray.with_icon_templated(icon());
         #[cfg(not(target_os = "macos"))]
         let tray = tray.with_icon(icon());
-        let tray = tray.build()?;
+        let tray = tray
+            .build()
+            .inspect_err(|e| {
+                log(&format!("no tray icon ({e}); shortcuts still work, use `appkey settings`"));
+            })
+            .ok();
 
         let mut app = Self {
             config_path,
@@ -76,9 +95,12 @@ impl App {
             tray,
             menu,
             status,
+            settings: settings.id().clone(),
             edit: edit.id().clone(),
             reload: reload.id().clone(),
             quit: quit.id().clone(),
+            loaded_mtime: None,
+            settings_window: None,
         };
         app.reload();
         Ok(app)
@@ -97,14 +119,37 @@ impl App {
             }
             Event::Menu(id) if id == self.quit => return Flow::Quit,
             Event::Menu(id) if id == self.reload => self.reload(),
+            Event::Menu(id) if id == self.settings => self.open_settings(),
             Event::Menu(id) if id == self.edit => {
                 if let Err(e) = platform::open_in_editor(&self.config_path) {
                     self.set_status(&format!("could not open editor: {e:#}"));
                 }
             }
             Event::Menu(_) => {}
+            Event::Tick => {
+                if config_mtime(&self.config_path) != self.loaded_mtime {
+                    self.reload();
+                }
+            }
         }
         Flow::Continue
+    }
+
+    /// Opens the settings window (a separate `appkey settings` process), or brings
+    /// it forward if it's already open.
+    pub fn open_settings(&mut self) {
+        if let Some(child) = &mut self.settings_window
+            && matches!(child.try_wait(), Ok(None))
+        {
+            let _ = platform::focus_pid(child.id());
+            return;
+        }
+        let spawned = std::env::current_exe()
+            .and_then(|exe| std::process::Command::new(exe).arg("settings").spawn());
+        match spawned {
+            Ok(child) => self.settings_window = Some(child),
+            Err(e) => self.set_status(&format!("could not open settings: {e}")),
+        }
     }
 
     /// Re-reads the config and swaps the registered hotkeys. A broken config leaves
@@ -114,6 +159,7 @@ impl App {
             let _ = self.hotkeys.unregister(s.hotkey);
         }
         self.active.clear();
+        self.loaded_mtime = config_mtime(&self.config_path);
 
         let cfg = match config::load_or_init(&self.config_path) {
             Ok(cfg) => cfg,
@@ -140,10 +186,16 @@ impl App {
         log(msg);
         let first_line = msg.lines().next().unwrap_or_default();
         self.status.set_text(first_line);
-        let _ = self.tray.set_tooltip(Some(format!("appkey: {first_line}")));
-        // Some tray backends (Linux SNI) snapshot the menu; push the change.
-        self.tray.set_menu(Some(Box::new(self.menu.clone())));
+        if let Some(tray) = &self.tray {
+            let _ = tray.set_tooltip(Some(format!("appkey: {first_line}")));
+            // Some tray backends (Linux SNI) snapshot the menu; push the change.
+            tray.set_menu(Some(Box::new(self.menu.clone())));
+        }
     }
+}
+
+fn config_mtime(path: &std::path::Path) -> Option<SystemTime> {
+    std::fs::metadata(path).and_then(|m| m.modified()).ok()
 }
 
 fn log(msg: &str) {
@@ -168,6 +220,7 @@ pub fn run(config_path: PathBuf) -> Result<()> {
     use tao::event_loop::{ControlFlow, EventLoopBuilder};
 
     platform::ensure_supported()?;
+    let first_run = config::ensure_exists(&config_path)?;
     #[allow(unused_mut)]
     let mut event_loop = EventLoopBuilder::<Event>::with_user_event().build();
     #[cfg(target_os = "macos")]
@@ -186,16 +239,26 @@ pub fn run(config_path: PathBuf) -> Result<()> {
 
     let mut app: Option<App> = None;
     event_loop.run(move |event, _, flow| {
-        *flow = ControlFlow::Wait;
+        *flow = ControlFlow::WaitUntil(std::time::Instant::now() + WATCH_INTERVAL);
         match event {
             // The tray must be created once the loop is running (macOS requirement).
             LoopEvent::NewEvents(StartCause::Init) => match App::new(config_path.clone()) {
-                Ok(a) => app = Some(a),
+                Ok(mut a) => {
+                    if first_run {
+                        a.open_settings();
+                    }
+                    app = Some(a);
+                }
                 Err(e) => {
                     eprintln!("appkey: {e:#}");
                     std::process::exit(1);
                 }
             },
+            LoopEvent::NewEvents(StartCause::ResumeTimeReached { .. }) => {
+                if let Some(a) = app.as_mut() {
+                    a.handle(Event::Tick);
+                }
+            }
             LoopEvent::UserEvent(e) => {
                 if app.as_mut().is_some_and(|a| a.handle(e) == Flow::Quit) {
                     *flow = ControlFlow::Exit;
@@ -208,13 +271,24 @@ pub fn run(config_path: PathBuf) -> Result<()> {
 
 #[cfg(target_os = "linux")]
 pub fn run(config_path: PathBuf) -> Result<()> {
+    use std::sync::mpsc::RecvTimeoutError;
+
     platform::ensure_supported()?;
+    let first_run = config::ensure_exists(&config_path)?;
     let (tx, rx) = std::sync::mpsc::channel();
     forward_events(move |e| {
         let _ = tx.send(e);
     });
     let mut app = App::new(config_path)?;
-    for event in rx {
+    if first_run {
+        app.open_settings();
+    }
+    loop {
+        let event = match rx.recv_timeout(WATCH_INTERVAL) {
+            Ok(e) => e,
+            Err(RecvTimeoutError::Timeout) => Event::Tick,
+            Err(RecvTimeoutError::Disconnected) => break,
+        };
         if app.handle(event) == Flow::Quit {
             break;
         }

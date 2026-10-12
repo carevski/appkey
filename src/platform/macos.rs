@@ -11,15 +11,19 @@ use std::path::Path;
 use std::process::Command;
 
 use anyhow::{Result, bail};
-use objc2_app_kit::{NSApplicationActivationPolicy, NSWorkspace};
-use objc2_foundation::NSString;
+use objc2_app_kit::{
+    NSApplicationActivationOptions, NSApplicationActivationPolicy, NSRunningApplication,
+    NSWorkspace,
+};
+use objc2_foundation::{NSBundle, NSString};
 
-use super::{Outcome, spawn};
+use super::{AppInfo, Outcome, spawn};
 use crate::matcher::matches;
 
 const OPEN: &str = "/usr/bin/open";
 
 struct App {
+    pid: i32,
     name: String,
     bundle_id: Option<String>,
     bundle_path: Option<String>,
@@ -33,6 +37,7 @@ fn regular_apps() -> Vec<App> {
         .filter(|a| a.activationPolicy() == NSApplicationActivationPolicy::Regular)
         .filter_map(|a| {
             Some(App {
+                pid: a.processIdentifier(),
                 name: a.localizedName().as_deref().map(to_string)?,
                 bundle_id: a.bundleIdentifier().as_deref().map(to_string),
                 bundle_path: a.bundleURL().and_then(|u| u.path()).as_deref().map(to_string),
@@ -76,15 +81,76 @@ fn run_open(args: &[&str]) -> Result<()> {
     Ok(())
 }
 
+impl App {
+    fn info(self) -> AppInfo {
+        // Bundle ids survive renames and localisation, so prefer them for matching.
+        AppInfo {
+            app: self.bundle_id.unwrap_or_else(|| self.name.clone()),
+            name: self.name,
+            launch: None,
+        }
+    }
+}
+
 #[allow(clippy::unnecessary_wraps)] // same signature on every platform
-pub fn running_apps() -> Result<Vec<String>> {
-    Ok(regular_apps()
-        .into_iter()
-        .map(|a| match a.bundle_id {
-            Some(id) => format!("{}  ({id})", a.name),
-            None => a.name,
+pub fn running_apps() -> Result<Vec<AppInfo>> {
+    let mut apps: Vec<AppInfo> = regular_apps().into_iter().map(App::info).collect();
+    apps.sort_by_key(|a| a.name.to_lowercase());
+    Ok(apps)
+}
+
+pub fn installed_apps() -> Vec<AppInfo> {
+    let home = dirs::home_dir().map(|h| h.join("Applications"));
+    let dirs = [
+        "/Applications",
+        "/Applications/Utilities",
+        "/System/Applications",
+        "/System/Applications/Utilities",
+    ]
+    .into_iter()
+    .map(std::path::PathBuf::from)
+    .chain(home);
+    let mut apps: Vec<AppInfo> = dirs
+        .filter_map(|d| std::fs::read_dir(d).ok())
+        .flat_map(|entries| entries.flatten().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|e| e == "app"))
+        .filter_map(|p| {
+            let name = p.file_stem()?.to_string_lossy().into_owned();
+            let bundle = NSBundle::bundleWithPath(&NSString::from_str(&p.to_string_lossy()))?;
+            let app = bundle.bundleIdentifier().map_or_else(|| name.clone(), |id| id.to_string());
+            Some(AppInfo { name, app, launch: None })
         })
-        .collect())
+        .collect();
+    apps.sort_by_key(|a| a.name.to_lowercase());
+    apps.dedup_by(|a, b| a.app == b.app);
+    apps
+}
+
+#[allow(clippy::unnecessary_wraps)] // same signature on every platform
+pub fn frontmost_app() -> Result<Option<AppInfo>> {
+    let me = i32::try_from(std::process::id()).unwrap_or_default();
+    let Some(front) = NSWorkspace::sharedWorkspace().frontmostApplication() else {
+        return Ok(None);
+    };
+    if front.processIdentifier() == me {
+        return Ok(None);
+    }
+    Ok(regular_apps().into_iter().find(|a| a.pid == front.processIdentifier()).map(App::info))
+}
+
+#[allow(clippy::unnecessary_wraps)] // same signature on every platform
+pub fn focus_pid(pid: u32) -> Result<bool> {
+    let Some(app) = i32::try_from(pid)
+        .ok()
+        .and_then(NSRunningApplication::runningApplicationWithProcessIdentifier)
+    else {
+        return Ok(false);
+    };
+    #[allow(deprecated)] // still the only way to come forward when another app is active
+    Ok(app.activateWithOptions(
+        NSApplicationActivationOptions::ActivateAllWindows
+            | NSApplicationActivationOptions::ActivateIgnoringOtherApps,
+    ))
 }
 
 pub fn diagnostics() -> Vec<String> {

@@ -7,22 +7,36 @@ use std::str::FromStr;
 
 use anyhow::{Context, Result, bail};
 use global_hotkey::hotkey::HotKey;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct RawConfig {
     #[serde(default, rename = "shortcut")]
-    shortcuts: Vec<RawShortcut>,
+    shortcuts: Vec<Entry>,
 }
 
-#[derive(Debug, Deserialize)]
+/// One `[[shortcut]]` exactly as written in the file (unvalidated). The settings
+/// window edits these and writes them back.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct RawShortcut {
-    keys: String,
-    app: String,
-    launch: Option<Vec<String>>,
-    os: Option<Vec<String>>,
+pub struct Entry {
+    pub keys: String,
+    /// Display name for the settings window; not used for matching.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    pub app: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub os: Option<Vec<String>>,
+}
+
+impl Entry {
+    /// Whether this entry is active on the OS we're running on.
+    pub fn applies_here(&self) -> bool {
+        self.os.as_ref().is_none_or(|os| os.iter().any(|o| o == CURRENT_OS))
+    }
 }
 
 /// A validated shortcut for the current OS.
@@ -50,23 +64,57 @@ pub fn path() -> Result<PathBuf> {
     Ok(dir.join("appkey").join("config.toml"))
 }
 
-/// Loads the config, creating the example file on first run.
-pub fn load_or_init(path: &Path) -> Result<Config> {
-    if !path.exists() {
-        write_example(path)?;
-        eprintln!("appkey: created example config at {}", path.display());
+/// Creates the example config if there is none. Returns `true` if it was created
+/// (i.e. this is the first run).
+pub fn ensure_exists(path: &Path) -> Result<bool> {
+    if path.exists() {
+        return Ok(false);
     }
-    check_permissions(path)?;
-    let text = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-    parse(&text).with_context(|| format!("in {}", path.display()))
+    write_example(path)?;
+    eprintln!("appkey: created example config at {}", path.display());
+    Ok(true)
 }
 
-pub fn parse(text: &str) -> Result<Config> {
+/// Loads and validates the config, creating the example file on first run.
+pub fn load_or_init(path: &Path) -> Result<Config> {
+    ensure_exists(path)?;
+    validate(read_entries(path)?).with_context(|| format!("in {}", path.display()))
+}
+
+/// Reads the raw entries (all OSes) without validating them.
+pub fn read_entries(path: &Path) -> Result<Vec<Entry>> {
+    check_permissions(path)?;
+    let text = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let raw: RawConfig = toml::from_str(&text).with_context(|| format!("in {}", path.display()))?;
+    Ok(raw.shortcuts)
+}
+
+/// Writes entries atomically (temp file + rename), readable only by the user.
+pub fn save_entries(path: &Path, entries: &[Entry]) -> Result<()> {
+    let body = toml::to_string(&RawConfig { shortcuts: entries.to_vec() })?;
+    let tmp = path.with_extension("toml.tmp");
+    let _ = fs::remove_file(&tmp);
+    write_new(&tmp, &format!("{SAVED_HEADER}\n{body}"))?;
+    fs::rename(&tmp, path).with_context(|| format!("replacing {}", path.display()))
+}
+
+const SAVED_HEADER: &str = "\
+# appkey config, written by the settings window (appkey settings).
+# Hand edits are fine but comments are not kept. Format: see the README.
+";
+
+#[cfg(test)]
+fn parse(text: &str) -> Result<Config> {
     let raw: RawConfig = toml::from_str(text)?;
+    validate(raw.shortcuts)
+}
+
+/// Checks entries for the current OS and turns them into registrable shortcuts.
+pub fn validate(entries: Vec<Entry>) -> Result<Config> {
     let mut seen: HashMap<u32, String> = HashMap::new();
     let mut shortcuts = Vec::new();
 
-    for (i, s) in raw.shortcuts.into_iter().enumerate() {
+    for (i, s) in entries.into_iter().enumerate() {
         let n = i + 1;
         if let Some(os) = &s.os {
             if let Some(bad) = os.iter().find(|o| !KNOWN_OS.contains(&o.as_str())) {
@@ -119,12 +167,18 @@ fn write_example(path: &Path) -> Result<()> {
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     }
+    write_new(path, EXAMPLE)
+}
+
+/// Creates `path` (must not exist) with mode 0600 on Unix.
+fn write_new(path: &Path, contents: &str) -> Result<()> {
     let mut opts = fs::OpenOptions::new();
     opts.write(true).create_new(true);
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
     let mut file = opts.open(path).with_context(|| format!("creating {}", path.display()))?;
-    std::io::Write::write_all(&mut file, EXAMPLE.as_bytes())?;
+    std::io::Write::write_all(&mut file, contents.as_bytes())?;
+    file.sync_all()?;
     Ok(())
 }
 
@@ -213,6 +267,34 @@ mod tests {
         let s = &cfg.shortcuts[0];
         assert_eq!(s.hotkey, HotKey::from_str("alt+control+KeyT").unwrap());
         assert_eq!(s.launch.as_deref(), Some(&["term".to_owned(), "--new".to_owned()][..]));
+    }
+
+    #[test]
+    fn save_round_trips_and_keeps_other_os_entries() {
+        let dir = std::env::temp_dir().join(format!("appkey-save-{}", std::process::id()));
+        let path = dir.join("config.toml");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let entries = vec![
+            Entry {
+                keys: "ctrl+alt+t".into(),
+                name: Some("Terminal".into()),
+                app: "term".into(),
+                launch: Some(vec!["term".into(), "--x".into()]),
+                os: None,
+            },
+            Entry {
+                keys: "ctrl+alt+t".into(),
+                app: "other".into(),
+                os: Some(vec!["plan9".into()]),
+                ..Entry::default()
+            },
+        ];
+        save_entries(&path, &entries).unwrap();
+        assert_eq!(read_entries(&path).unwrap(), entries);
+        save_entries(&path, &entries[..1]).unwrap(); // overwrite works
+        assert_eq!(read_entries(&path).unwrap().len(), 1);
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[cfg(unix)]

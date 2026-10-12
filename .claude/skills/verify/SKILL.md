@@ -25,9 +25,9 @@ If `cargo` isn't found: `export PATH="/opt/homebrew/opt/rustup/bin:$PATH"`.
    podman machine start 2>/dev/null; podman run --rm -v "$PWD":/src:ro -v appkey-linux-target:/target -v appkey-cargo-registry:/usr/local/cargo/registry -e CARGO_TARGET_DIR=/target -w /src docker.io/library/rust:1-slim sh -c 'rustup component add clippy >/dev/null && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked'
    ```
 
-   Then the X11 end-to-end test (real focusing on a virtual desktop). The container is ARM, so build for aarch64:
+   Then both end-to-end tests on a virtual desktop (focusing, and the settings window flow):
    ```bash
-   podman run --rm -v "$PWD":/src -v appkey-linux-target:/src/target -v appkey-cargo-registry:/usr/local/cargo/registry -w /src docker.io/library/rust:1-slim bash -c 'rustup target add aarch64-unknown-linux-musl >/dev/null && cargo build -q --release --target aarch64-unknown-linux-musl && apt-get -qq update && apt-get -qq install -y xvfb openbox xterm xdotool x11-utils >/dev/null && scripts/test-x11.sh target/aarch64-unknown-linux-musl/release/appkey </dev/null'
+   podman run --rm -v "$PWD":/src -v appkey-linux-target-gnu:/src/target -v appkey-cargo-registry:/usr/local/cargo/registry -w /src docker.io/library/rust:1-slim bash -c 'apt-get -qq update && apt-get -qq install -y xvfb openbox xterm xdotool x11-utils fonts-dejavu-core fontconfig libgl1-mesa-dri libegl1 libxkbcommon-x11-0 libxcursor1 libxrandr2 libxi6 >/dev/null && cargo build -q --release && scripts/test-x11.sh target/release/appkey </dev/null && scripts/test-settings-ui.sh target/release/appkey </dev/null'
    ```
 
 4. **Workflows / scripts** (when `.github/` or `scripts/` changed):
@@ -36,6 +36,8 @@ If `cargo` isn't found: `export PATH="/opt/homebrew/opt/rustup/bin:$PATH"`.
    podman run --rm -v "$PWD":/mnt:ro docker.io/koalaman/shellcheck:stable -S warning scripts/*.sh
    ```
 
-5. **Size** (only when dependencies or the release profile changed): `cargo build --release && ls -lh target/release/appkey`. Report the before/after size.
+5. **UI changes:** look at them. `APPKEY_SCREENSHOT=/tmp/main.png cargo run -- settings` (and `APPKEY_SCREENSHOT_SCENE=picker`), then Read the PNGs.
+
+6. **Size** (only when dependencies or the release profile changed): `cargo build --release && ls -lh target/release/appkey`. Report the before/after size.
 
 Report which steps passed. Be explicit that steps 2–3 are compile/unit-test checks, not proof the hotkeys and focusing work on that OS. That needs a manual run there (or CI artifacts).

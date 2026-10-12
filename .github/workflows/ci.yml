@@ -30,13 +30,17 @@ jobs:
       - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo test --locked
 
-  # Real focus/launch behaviour on a virtual X11 desktop.
+  # Real focus/launch behaviour and the settings window on a virtual X11 desktop.
   linux-x11-e2e:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: sudo apt-get update && sudo apt-get install -y xvfb openbox xterm xdotool x11-utils
+      - run: >-
+          sudo apt-get update && sudo apt-get install -y xvfb openbox xterm xdotool x11-utils
+          fonts-dejavu-core fontconfig libgl1-mesa-dri libegl1
+          libxkbcommon-x11-0 libxcursor1 libxrandr2 libxi6
       - run: cargo build --release --locked
       - run: scripts/test-x11.sh target/release/appkey
+      - run: scripts/test-settings-ui.sh target/release/appkey

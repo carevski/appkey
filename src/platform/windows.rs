@@ -21,17 +21,19 @@ use windows::Win32::System::Threading::{
     OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GW_OWNER, GWL_EXSTYLE, GetWindow, GetWindowLongW, GetWindowThreadProcessId,
-    IsIconic, IsWindowVisible, SW_RESTORE, SetForegroundWindow, ShowWindow, WS_EX_TOOLWINDOW,
+    EnumWindows, GW_OWNER, GWL_EXSTYLE, GetForegroundWindow, GetWindow, GetWindowLongW,
+    GetWindowThreadProcessId, IsIconic, IsWindowVisible, SW_RESTORE, SetForegroundWindow,
+    ShowWindow, WS_EX_TOOLWINDOW,
 };
 use windows::core::{BOOL, PWSTR};
 
-use super::{Outcome, spawn};
+use super::{AppInfo, Outcome, lnk, spawn};
 use crate::matcher::matches;
 
 /// An app window and the full path of the executable that owns it.
 struct AppWindow {
     hwnd: HWND,
+    pid: u32,
     exe: String,
 }
 
@@ -42,9 +44,9 @@ fn app_windows() -> Vec<AppWindow> {
         // outlives the (synchronous) enumeration.
         let out = unsafe { &mut *(lparam.0 as *mut Vec<AppWindow>) };
         if is_app_window(hwnd)
-            && let Some(exe) = exe_path(hwnd)
+            && let Some((pid, exe)) = exe_path(hwnd)
         {
-            out.push(AppWindow { hwnd, exe });
+            out.push(AppWindow { hwnd, pid, exe });
         }
         BOOL::from(true)
     }
@@ -81,7 +83,8 @@ fn is_app_window(hwnd: HWND) -> bool {
     }
 }
 
-fn exe_path(hwnd: HWND) -> Option<String> {
+/// The owning process id and its executable's full path.
+fn exe_path(hwnd: HWND) -> Option<(u32, String)> {
     let mut pid = 0u32;
     // SAFETY: Win32 calls with valid out-pointers; the process handle is closed below.
     unsafe {
@@ -97,7 +100,7 @@ fn exe_path(hwnd: HWND) -> Option<String> {
         );
         let _ = CloseHandle(process);
         res.ok()?;
-        Some(OsString::from_wide(&buf[..len as usize]).to_string_lossy().into_owned())
+        Some((pid, OsString::from_wide(&buf[..len as usize]).to_string_lossy().into_owned()))
     }
 }
 
@@ -110,19 +113,24 @@ fn window_matches(app: &str, exe: &str) -> bool {
     if app.contains(['\\', '/']) { matches(app, exe) } else { matches(app, exe_name(exe)) }
 }
 
+/// Restores (if minimized) and focuses a window. `false` if Windows refused.
+fn activate(hwnd: HWND) -> bool {
+    // SAFETY: `hwnd` came from EnumWindows; a stale handle just makes these fail.
+    unsafe {
+        if IsIconic(hwnd).as_bool() {
+            let _ = ShowWindow(hwnd, SW_RESTORE);
+        }
+        SetForegroundWindow(hwnd).as_bool()
+    }
+}
+
 pub fn focus_or_launch(app: &str, launch: Option<&[String]>) -> Result<Outcome> {
     if let Some(w) = app_windows().into_iter().find(|w| window_matches(app, &w.exe)) {
-        // SAFETY: `w.hwnd` came from EnumWindows; a stale handle just makes these fail.
-        unsafe {
-            if IsIconic(w.hwnd).as_bool() {
-                let _ = ShowWindow(w.hwnd, SW_RESTORE);
-            }
-            if !SetForegroundWindow(w.hwnd).as_bool() {
-                bail!(
-                    "Windows refused to focus {} (if it runs as administrator, appkey must too)",
-                    exe_name(&w.exe)
-                );
-            }
+        if !activate(w.hwnd) {
+            bail!(
+                "Windows refused to focus {} (if it runs as administrator, appkey must too)",
+                exe_name(&w.exe)
+            );
         }
         return Ok(Outcome::Focused);
     }
@@ -133,13 +141,74 @@ pub fn focus_or_launch(app: &str, launch: Option<&[String]>) -> Result<Outcome> 
     Ok(Outcome::Launched)
 }
 
+/// `C:\\…\\Code.exe` → name "Code", app "Code.exe", launch the full path
+/// (exe names usually aren't on PATH, so the default launch wouldn't find them).
+fn info_for_exe(path: &str) -> AppInfo {
+    let file = exe_name(path);
+    let name = file.strip_suffix(".exe").or_else(|| file.strip_suffix(".EXE")).unwrap_or(file);
+    AppInfo { name: name.to_owned(), app: file.to_owned(), launch: Some(vec![path.to_owned()]) }
+}
+
 #[allow(clippy::unnecessary_wraps)] // same signature on every platform
-pub fn running_apps() -> Result<Vec<String>> {
-    let mut names: Vec<String> =
-        app_windows().into_iter().map(|w| exe_name(&w.exe).to_owned()).collect();
-    names.sort_by_key(|n| n.to_lowercase());
-    names.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
-    Ok(names)
+pub fn running_apps() -> Result<Vec<AppInfo>> {
+    let mut apps: Vec<AppInfo> = app_windows().iter().map(|w| info_for_exe(&w.exe)).collect();
+    apps.sort_by_key(|a| a.name.to_lowercase());
+    apps.dedup_by(|a, b| a.app.eq_ignore_ascii_case(&b.app));
+    Ok(apps)
+}
+
+/// Start Menu shortcuts (all users + current user) that point at an `.exe`.
+pub fn installed_apps() -> Vec<AppInfo> {
+    let roots = [
+        ("ProgramData", r"Microsoft\Windows\Start Menu\Programs"),
+        ("APPDATA", r"Microsoft\Windows\Start Menu\Programs"),
+    ];
+    let mut links = Vec::new();
+    for (var, sub) in roots {
+        if let Some(base) = std::env::var_os(var) {
+            collect_links(&std::path::PathBuf::from(base).join(sub), &mut links);
+        }
+    }
+    let mut apps: Vec<AppInfo> = links
+        .into_iter()
+        .filter_map(|link| {
+            let target = lnk::target_path(&std::fs::read(&link).ok()?)?;
+            let name = link.file_stem()?.to_string_lossy().into_owned();
+            let lower = name.to_lowercase();
+            if !target.to_lowercase().ends_with(".exe") || lower.contains("uninstall") {
+                return None;
+            }
+            Some(AppInfo { name, ..info_for_exe(&target) })
+        })
+        .collect();
+    apps.sort_by_key(|a| a.name.to_lowercase());
+    apps.dedup_by(|a, b| a.app.eq_ignore_ascii_case(&b.app));
+    apps
+}
+
+fn collect_links(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for path in entries.flatten().map(|e| e.path()) {
+        if path.is_dir() {
+            collect_links(&path, out);
+        } else if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("lnk")) {
+            out.push(path);
+        }
+    }
+}
+
+#[allow(clippy::unnecessary_wraps)] // same signature on every platform
+pub fn frontmost_app() -> Result<Option<AppInfo>> {
+    // SAFETY: no preconditions; may return a null handle.
+    let hwnd = unsafe { GetForegroundWindow() };
+    Ok(exe_path(hwnd)
+        .filter(|(pid, _)| *pid != std::process::id())
+        .map(|(_, exe)| info_for_exe(&exe)))
+}
+
+#[allow(clippy::unnecessary_wraps)] // same signature on every platform
+pub fn focus_pid(pid: u32) -> Result<bool> {
+    Ok(app_windows().into_iter().find(|w| w.pid == pid).is_some_and(|w| activate(w.hwnd)))
 }
 
 pub fn diagnostics() -> Vec<String> {

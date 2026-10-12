@@ -5,6 +5,7 @@ mod app;
 mod config;
 mod matcher;
 mod platform;
+mod ui;
 
 use std::path::Path;
 use std::process::ExitCode;
@@ -19,6 +20,7 @@ USAGE:
 
 COMMANDS:
     run           Start in the tray and listen for shortcuts (default)
+    settings      Open the settings window
     check         Validate the config and show platform notes
     list          Show running apps and the names to use as `app` in the config
     open <app>    Focus or launch <app> once, exactly like a shortcut would
@@ -47,12 +49,13 @@ fn cli(args: &[String]) -> Result<()> {
         [] | ["run"] => app::run(path),
         ["check"] => check(&path),
         ["list"] => {
-            for name in platform::running_apps()? {
-                println!("{name}");
+            for a in platform::running_apps()? {
+                println!("{:<28} app = {:?}", a.name, a.app);
             }
             Ok(())
         }
         ["open", app] => open(&path, app),
+        ["settings"] => ui::run(path),
         ["config"] => {
             println!("{}", path.display());
             Ok(())

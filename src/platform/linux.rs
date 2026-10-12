@@ -23,7 +23,7 @@ use x11rb::protocol::xproto::{
 use x11rb::rust_connection::RustConnection;
 use x11rb::wrapper::ConnectionExt as _;
 
-use super::{Outcome, spawn};
+use super::{AppInfo, Outcome, desktop_entry, spawn};
 use crate::matcher::matches;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -71,6 +71,7 @@ struct X {
     stacking: Atom,
     client_list: Atom,
     active: Atom,
+    wm_pid: Atom,
 }
 
 impl X {
@@ -83,7 +84,8 @@ impl X {
         let stacking = atom(b"_NET_CLIENT_LIST_STACKING")?;
         let client_list = atom(b"_NET_CLIENT_LIST")?;
         let active = atom(b"_NET_ACTIVE_WINDOW")?;
-        Ok(Self { conn, root, stacking, client_list, active })
+        let wm_pid = atom(b"_NET_WM_PID")?;
+        Ok(Self { conn, root, stacking, client_list, active, wm_pid })
     }
 
     /// Managed windows, most recently used first (falls back to mapping order).
@@ -104,6 +106,27 @@ impl X {
         bail!(
             "the window manager does not publish a window list (_NET_CLIENT_LIST); is it EWMH-compliant?"
         )
+    }
+
+    fn pid(&self, w: Window) -> Option<u32> {
+        let reply = self
+            .conn
+            .get_property(false, w, self.wm_pid, AtomEnum::CARDINAL, 0, 1)
+            .ok()?
+            .reply()
+            .ok()?;
+        reply.value32()?.next()
+    }
+
+    /// The window's app, named after its installed `.desktop` entry when one matches.
+    fn app_info(&self, w: Window, installed: &[AppInfo]) -> Option<AppInfo> {
+        let class = self.wm_class(w);
+        let known = installed.iter().find(|a| class.iter().any(|c| matches(&a.app, c)));
+        match (known, class.last()) {
+            (Some(a), _) => Some(a.clone()),
+            (None, Some(c)) => Some(AppInfo { name: c.clone(), app: c.clone(), launch: None }),
+            (None, None) => None,
+        }
     }
 
     /// `WM_CLASS` is two NUL-terminated strings: instance, then class.
@@ -200,23 +223,35 @@ pub fn focus_or_launch(app: &str, launch: Option<&[String]>) -> Result<Outcome> 
     Ok(Outcome::Launched)
 }
 
-pub fn running_apps() -> Result<Vec<String>> {
+pub fn running_apps() -> Result<Vec<AppInfo>> {
     let x = X::connect()?;
-    let mut names: Vec<String> = x
-        .windows_mru()?
-        .into_iter()
-        .filter_map(|w| {
-            let class = x.wm_class(w);
-            match class.as_slice() {
-                [] => None,
-                [one] => Some(one.clone()),
-                [instance, class, ..] => Some(format!("{class}  (or {instance})")),
-            }
-        })
-        .collect();
-    names.sort_by_key(|n| n.to_lowercase());
-    names.dedup();
-    Ok(names)
+    let installed = installed_apps();
+    let mut apps: Vec<AppInfo> =
+        x.windows_mru()?.into_iter().filter_map(|w| x.app_info(w, &installed)).collect();
+    apps.sort_by_key(|a| a.name.to_lowercase());
+    apps.dedup_by(|a, b| a.app == b.app);
+    Ok(apps)
+}
+
+pub fn installed_apps() -> Vec<AppInfo> {
+    desktop_entry::scan(&desktop_entry::search_dirs())
+}
+
+pub fn frontmost_app() -> Result<Option<AppInfo>> {
+    let x = X::connect()?;
+    let w = x.current_active();
+    if w == 0 || x.pid(w) == Some(std::process::id()) {
+        return Ok(None);
+    }
+    Ok(x.app_info(w, &installed_apps()))
+}
+
+pub fn focus_pid(pid: u32) -> Result<bool> {
+    let x = X::connect()?;
+    match x.windows_mru()?.into_iter().find(|&w| x.pid(w) == Some(pid)) {
+        Some(w) => x.activate(w).map(|()| true),
+        None => Ok(false),
+    }
 }
 
 pub fn diagnostics() -> Vec<String> {
