@@ -38,7 +38,8 @@ wm_ready() { xprop -root _NET_SUPPORTING_WM_CHECK | grep -q 'window id'; }
 wait_for 10 wm_ready || { report FAIL "openbox did not start"; exit 1; }
 
 start() { # start <instance> <class> <title>
-    xterm -name "$1" -class "$2" -T "$3" >/dev/null 2>&1 &
+    # Run `sleep`, not a shell: shells often rewrite the title from their prompt.
+    xterm -name "$1" -class "$2" -T "$3" -e sleep 600 >/dev/null 2>&1 &
     # Wait until the window manager has it in its client list (= managed, mapped).
     wait_for 15 managed "$3" || report FAIL "window $3 did not appear"
 }
