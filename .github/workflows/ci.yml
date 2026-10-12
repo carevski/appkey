@@ -21,7 +21,7 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -34,9 +34,9 @@ jobs:
   linux-x11-e2e:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: sudo apt-get update && sudo apt-get install -y xvfb openbox xterm xdotool
+      - run: sudo apt-get update && sudo apt-get install -y xvfb openbox xterm xdotool x11-utils
       - run: cargo build --release --locked
       - run: scripts/test-x11.sh target/release/appkey

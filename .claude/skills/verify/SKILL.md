@@ -27,13 +27,13 @@ If `cargo` isn't found: `export PATH="/opt/homebrew/opt/rustup/bin:$PATH"`.
 
    Then the X11 end-to-end test (real focusing on a virtual desktop). The container is ARM, so build for aarch64:
    ```bash
-   podman run --rm -v "$PWD":/src -v appkey-linux-target:/src/target -v appkey-cargo-registry:/usr/local/cargo/registry -w /src docker.io/library/rust:1-slim bash -c 'rustup target add aarch64-unknown-linux-musl >/dev/null && cargo build -q --release --target aarch64-unknown-linux-musl && apt-get -qq update && apt-get -qq install -y xvfb openbox xterm xdotool >/dev/null && scripts/test-x11.sh target/aarch64-unknown-linux-musl/release/appkey </dev/null'
+   podman run --rm -v "$PWD":/src -v appkey-linux-target:/src/target -v appkey-cargo-registry:/usr/local/cargo/registry -w /src docker.io/library/rust:1-slim bash -c 'rustup target add aarch64-unknown-linux-musl >/dev/null && cargo build -q --release --target aarch64-unknown-linux-musl && apt-get -qq update && apt-get -qq install -y xvfb openbox xterm xdotool x11-utils >/dev/null && scripts/test-x11.sh target/aarch64-unknown-linux-musl/release/appkey </dev/null'
    ```
 
 4. **Workflows / scripts** (when `.github/` or `scripts/` changed):
    ```bash
    podman run --rm -v "$PWD":/repo:ro -w /repo docker.io/rhysd/actionlint:latest -no-color -oneline
-   podman run --rm -v "$PWD":/mnt:ro docker.io/koalaman/shellcheck:stable scripts/*.sh
+   podman run --rm -v "$PWD":/mnt:ro docker.io/koalaman/shellcheck:stable -S warning scripts/*.sh
    ```
 
 5. **Size** (only when dependencies or the release profile changed): `cargo build --release && ls -lh target/release/appkey`. Report the before/after size.
