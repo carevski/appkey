@@ -131,7 +131,8 @@ impl PortalHotkeys {
         }
     }
 
-    fn bind(&mut self, shortcuts: &[Shortcut]) -> Result<()> {
+    /// Binds `shortcuts`; returns the ids the desktop left without keys.
+    fn bind(&mut self, shortcuts: &[Shortcut]) -> Result<Vec<String>> {
         if let Some(old) = self.session.lock().map_err(|_| anyhow!("poisoned"))?.take() {
             let _ = self.conn.call_method(
                 Some(DEST),
@@ -142,7 +143,7 @@ impl PortalHotkeys {
             );
         }
         if shortcuts.is_empty() {
-            return Ok(());
+            return Ok(Vec::new());
         }
         debug("portal: CreateSession");
         let results = self.request("CreateSession", |token| {
@@ -171,17 +172,36 @@ impl PortalHotkeys {
             .collect();
         let session_path = ObjectPath::try_from(handle.as_str())?;
         debug(&format!("portal: BindShortcuts on {handle}"));
-        self.request("BindShortcuts", |token| {
+        let results = self.request("BindShortcuts", |token| {
             let mut opts = HashMap::new();
             opts.insert("handle_token", Value::from(token));
             (session_path, list, "", opts)
         })?;
         debug("portal: bound");
+        // A desktop can accept a shortcut but assign it no keys (KDE does after the
+        // user once cancelled its dialog). Report those instead of claiming success.
+        let unassigned = results
+            .get("shortcuts")
+            .and_then(|v| v.try_clone().ok())
+            .and_then(|v| Vec::<(String, HashMap<String, OwnedValue>)>::try_from(v).ok())
+            .map(|bound| {
+                bound
+                    .into_iter()
+                    .filter(|(_, props)| {
+                        props
+                            .get("trigger_description")
+                            .and_then(|t| t.downcast_ref::<String>().ok())
+                            .is_none_or(|t| t.trim().is_empty())
+                    })
+                    .map(|(id, _)| id)
+                    .collect()
+            })
+            .unwrap_or_default();
         if let Some(cleanup) = self.cleanup {
             let ids: Vec<String> = shortcuts.iter().map(|s| s.hotkey.id().to_string()).collect();
             cleanup(&self.conn, &ids);
         }
-        Ok(())
+        Ok(unassigned)
     }
 }
 
@@ -222,7 +242,11 @@ fn ensure_desktop_file() -> Result<()> {
 impl Hotkeys for PortalHotkeys {
     fn set(&mut self, shortcuts: &[Shortcut]) -> Vec<String> {
         match self.bind(shortcuts) {
-            Ok(()) => Vec::new(),
+            Ok(unassigned) => shortcuts
+                .iter()
+                .filter(|s| unassigned.contains(&s.hotkey.id().to_string()))
+                .map(|s| format!("{} (no keys assigned; set them in your desktop's shortcut settings, on KDE: System Settings → Shortcuts → appkey)", s.keys))
+                .collect(),
             Err(e) => shortcuts.iter().map(|s| format!("{} ({e:#})", s.keys)).collect(),
         }
     }

@@ -52,26 +52,41 @@ The daemon and the settings window are **two processes from the same binary**. E
 | macOS | Nothing. Carbon hotkeys and LaunchServices need no Accessibility, Input Monitoring or Automation permission. | If we ever need per-window control (AXUIElement), we must call `AXIsProcessTrustedWithOptions` with the prompt option and explain why first. Unsigned downloads are quarantined by Gatekeeper; signing/notarization is a release task. |
 | Windows | Nothing. | UIPI: windows of elevated processes can't be fully controlled from a non-elevated appkey. We report it rather than auto-elevating. Unsigned exes trigger SmartScreen; signing is a release task. |
 | Linux X11 | Nothing. X11 has no permission model. | n/a |
-| Linux Wayland | Not supported yet (see roadmap). The portal *will* show the user a consent dialog, which is the right model. | `ensure_supported` detects Wayland and explains the options. |
+| Linux Wayland | GNOME: the user keeps an extension enabled (visible and switchable in the Extensions app). KDE: the user approves shortcuts in KDE's dialog. Hyprland: nothing. | We never bypass the desktop: the extension only acts on appkey's D-Bus calls, the KDE dialog is the portal's own, and a cancelled approval is respected (reported, never overridden). The GNOME extension's D-Bus methods are reachable by any process of the same user, which can already control the session. |
 
-## Linux / Wayland roadmap
+## Linux backends
 
-Target distros: Mint/Cinnamon (X11 by default → supported today), Ubuntu (GNOME on **Wayland** by default; 25.10+ has no Xorg GNOME session), Arch (varies), KDE (Wayland default).
+`platform/linux/mod.rs` picks a backend from `XDG_SESSION_TYPE` / `XDG_CURRENT_DESKTOP` / `HYPRLAND_INSTANCE_SIGNATURE`. Each implements `WindowSystem` (list windows most-recently-used first, activate, active window) and supplies a `Hotkeys`. Matching, MRU choice and launching are shared.
 
-Wayland splits the job into two problems:
+| Session | Windows | Shortcuts | User-visible setup |
+|---|---|---|---|
+| X11 | EWMH (`x11.rs`) | `XGrabKey` (global-hotkey) | none |
+| GNOME Wayland | appkey's GNOME Shell extension (`gnome.rs`, `packaging/gnome-extension/`) | the extension (`grab_accelerator`) | log out/in once after first run |
+| KDE Plasma Wayland | KWin scripting over D-Bus (`kde.rs`) | GlobalShortcuts portal (`portal.rs`) | approve KDE's dialog |
+| Hyprland | IPC socket (`hyprland.rs`) | runtime `bind` → `appkey __hotkey <id>` | none |
+| other Wayland (Sway, Cinnamon, COSMIC…) | not supported yet | | `appkey` explains |
 
-1. **Global hotkeys:** `org.freedesktop.portal.GlobalShortcuts`. Supported by KDE Plasma 6, GNOME 48+, Hyprland. The user approves the shortcuts in a system dialog. Crate: `ashpd`.
-2. **Focusing another app's window:** no standard protocol. Per compositor:
-   - KDE: KWin scripting over D-Bus
-   - Sway / Hyprland: IPC (`swaymsg`, `hyprctl dispatch focuswindow`)
-   - GNOME: requires a small Shell extension (GNOME blocks `Shell.Eval`)
-   - Cinnamon Wayland: experimental; revisit later
+Decisions:
 
-Plan: add a `platform/linux/wayland/` backend with a `Compositor` enum detected from `XDG_CURRENT_DESKTOP`, starting with KDE + Hyprland/Sway (no extension needed), then GNOME via an extension.
+- **GNOME needs an extension; there is no other sanctioned way.** It lists windows in Alt+Tab order (`get_tab_list`), activates with a real timestamp, and grabs keys. It's installed by the packages, or by appkey into `~/.local/share` for the tarball, and enabled via `gsettings`. GNOME only discovers new extensions at login, so the daemon keeps running, says "log out and back in", and retries every 5 s. GNOME disables extensions on the lock screen; the extension emits `Started` when re-enabled and the daemon re-grabs.
+- **GNOME uses the extension for shortcuts too, not the portal.** We need the extension for windows anyway, and this avoids a second consent dialog.
+- **GNOME quirks handled in the extension:** activation is applied twice if focus didn't move (seen right after windows open), and again after the Activities overview finishes hiding (which otherwise restores the old focus). Placeholder app ids (`window:N`) are ignored.
+- **KDE uses the portal for shortcuts.** It shows its own approval dialog, which is correct and expected. KDE remembers every id it was ever given and keeps grabbing its keys, so after each bind we `unregister` ids we no longer use. If the user cancels, KDE later registers the shortcut with *no keys* and doesn't ask again. We read `trigger_description` from the bind result and report that (pointing to System Settings) instead of claiming success.
+- **Portal identity:** host apps must register an app id (`org.freedesktop.host.portal.Registry`) that matches an installed `.desktop` file; appkey writes `~/.local/share/applications/appkey.desktop` if no package installed one.
+- **KWin scripting:** a generated JS file is loaded, run (`/Scripting/ScriptN.run`), reports back with `callDBus` to our connection, and is unloaded.
+- **Hyprland binds exec a command,** so only our binary path (single-quoted) and a number ever reach the shell. Runtime binds vanish on config reload; we re-apply on `configreloaded`, and remove them on exit. The daemon handles SIGTERM/SIGINT/SIGHUP so this also happens on logout.
+
+### Testing Wayland
+
+`scripts/wayland/` holds a container image and an e2e script per desktop, run in CI (`linux-wayland-e2e`):
+
+- **GNOME 50**: `gnome-shell --headless --virtual-monitor` with a system bus and a mock logind (python-dbusmock). `--unsafe-mode` lets the test check focus via `Eval`, independently of appkey. Keys are real input events via Mutter's RemoteDesktop API (`mutter-keys.py`; the session dies with the D-Bus connection that created it, hence a script).
+- **KDE Plasma 6**: `kwin_wayland --virtual` (copied to drop file capabilities, which rootless containers refuse). The approval dialog is clicked through AT-SPI (`a11y.py`); shortcuts are fired with kglobalaccel's `invokeShortcut`.
+- **Hyprland**: needs a DRM device. Load `vkms` on the host and pass `/dev/dri`. Hyprland ignores virtual keyboards for binds, so the test runs the bound command itself.
 
 ## Not yet done
 
 - Start at login (LaunchAgent / `Run` registry key / XDG autostart), as an opt-in `appkey autostart on|off`
 - Code signing: Windows (Authenticode) and macOS (Developer ID + notarization), so users don't see SmartScreen/Gatekeeper warnings
 - AUR package for Arch
-- Wayland (above)
+- More Wayland desktops: Sway/labwc/river (wlr-foreign-toplevel + config binds), Cinnamon on Wayland (default in Mint stays X11 for now), COSMIC

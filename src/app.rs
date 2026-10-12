@@ -29,6 +29,8 @@ pub enum Event {
 
 /// How often the config file is checked for changes (e.g. saved by the settings window).
 const WATCH_INTERVAL: Duration = Duration::from_secs(1);
+/// How often to retry when the desktop's shortcut mechanism isn't available yet.
+const HOTKEY_RETRY: Duration = Duration::from_secs(5);
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Flow {
@@ -38,7 +40,12 @@ pub enum Flow {
 
 pub struct App {
     config_path: PathBuf,
-    hotkeys: Box<dyn Hotkeys>,
+    /// `None` while the desktop's shortcut mechanism isn't available yet (e.g. the
+    /// GNOME helper waits for a re-login); retried periodically.
+    hotkeys: Option<Box<dyn Hotkeys>>,
+    hotkeys_error: String,
+    sink: Sink,
+    next_retry: std::time::Instant,
     active: HashMap<u32, Shortcut>,
     /// `None` when the desktop has no tray (e.g. no `StatusNotifier` host): shortcuts still work.
     tray: Option<TrayIcon>,
@@ -61,7 +68,10 @@ impl std::fmt::Debug for App {
 
 impl App {
     pub fn new(config_path: PathBuf, sink: Sink) -> Result<Self> {
-        let hotkeys = platform::hotkeys(sink)?;
+        let (hotkeys, hotkeys_error) = match platform::hotkeys(sink.clone()) {
+            Ok(h) => (Some(h), String::new()),
+            Err(e) => (None, format!("{e:#}")),
+        };
         let status = MenuItem::new("appkey", false, None);
         let settings = MenuItem::new("Settings…", true, None);
         let edit = MenuItem::new("Edit config file…", true, None);
@@ -91,6 +101,9 @@ impl App {
         let mut app = Self {
             config_path,
             hotkeys,
+            hotkeys_error,
+            sink,
+            next_retry: std::time::Instant::now() + HOTKEY_RETRY,
             active: HashMap::new(),
             tray,
             menu,
@@ -127,7 +140,13 @@ impl App {
             }
             Event::Menu(_) => {}
             Event::Tick => {
-                if config_mtime(&self.config_path) != self.loaded_mtime {
+                if self.hotkeys.is_none() && std::time::Instant::now() >= self.next_retry {
+                    self.next_retry = std::time::Instant::now() + HOTKEY_RETRY;
+                    if let Ok(h) = platform::hotkeys(self.sink.clone()) {
+                        self.hotkeys = Some(h);
+                        self.reload();
+                    }
+                } else if config_mtime(&self.config_path) != self.loaded_mtime {
                     self.reload();
                 }
             }
@@ -158,14 +177,18 @@ impl App {
         self.active.clear();
         self.loaded_mtime = config_mtime(&self.config_path);
 
+        let Some(hotkeys) = self.hotkeys.as_mut() else {
+            let msg = format!("shortcuts unavailable: {}", self.hotkeys_error);
+            return self.set_status(&msg);
+        };
         let cfg = match config::load_or_init(&self.config_path) {
             Ok(cfg) => cfg,
             Err(e) => {
-                self.hotkeys.set(&[]);
+                hotkeys.set(&[]);
                 return self.set_status(&format!("config error: {e:#}"));
             }
         };
-        let failed = self.hotkeys.set(&cfg.shortcuts);
+        let failed = hotkeys.set(&cfg.shortcuts);
         let count = cfg.shortcuts.len() - failed.len();
         self.active = cfg.shortcuts.into_iter().map(|s| (s.hotkey.id(), s)).collect();
         let mut msg = format!("{count} shortcut(s) active");

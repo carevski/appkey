@@ -86,7 +86,6 @@ impl Combo {
     }
 
     /// GTK accelerator, used by GNOME Shell: `<Control><Alt>t`.
-    #[allow(dead_code)] // used by the GNOME backend (next step)
     pub fn gtk(&self) -> String {
         let mut s = String::new();
         for (on, name) in [

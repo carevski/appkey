@@ -4,11 +4,13 @@
 //! |--------------------|--------------------------------------|-----------------------------|
 //! | X11 (any WM)       | EWMH (`x11.rs`)                      | `XGrabKey` via global-hotkey |
 //! | Wayland: KDE       | KWin scripting (`kde.rs`)            | GlobalShortcuts portal      |
+//! | Wayland: GNOME     | appkey's Shell extension (`gnome.rs`) | the same extension          |
 //! | Wayland: Hyprland  | IPC socket (`hyprland.rs`)           | runtime `bind` → `appkey __hotkey` |
 //!
 //! Each backend implements [`WindowSystem`]; matching, most-recently-used choice
 //! and launching are shared here.
 
+mod gnome;
 mod hyprland;
 mod kde;
 mod portal;
@@ -74,6 +76,7 @@ enum Backend {
     X11,
     Kde,
     Hyprland,
+    Gnome,
 }
 
 fn backend() -> Result<Backend> {
@@ -83,9 +86,13 @@ fn backend() -> Result<Backend> {
             Ok(Backend::Kde)
         }
         Session::Wayland if var("HYPRLAND_INSTANCE_SIGNATURE").is_some() => Ok(Backend::Hyprland),
+        // Ubuntu reports `ubuntu:GNOME`.
+        Session::Wayland if desktop().split(':').any(|d| d.eq_ignore_ascii_case("GNOME")) => {
+            Ok(Backend::Gnome)
+        }
         Session::Wayland => bail!(
             "this Wayland desktop ({}) isn't supported yet.\n\
-             Supported: any X11 session; on Wayland: KDE Plasma, Hyprland. Options for now:\n\
+             Supported: any X11 session; on Wayland: GNOME, KDE Plasma, Hyprland. Options for now:\n\
              - log in with an X11/Xorg session, or\n\
              - use your desktop's own keyboard settings to run `appkey open <app>`.",
             desktop()
@@ -101,6 +108,7 @@ fn window_system() -> Result<Box<dyn WindowSystem>> {
         Backend::X11 => Ok(Box::new(x11::X::connect()?)),
         Backend::Kde => Ok(Box::new(kde::Kwin::connect()?)),
         Backend::Hyprland => Ok(Box::new(hyprland::Hypr::connect()?)),
+        Backend::Gnome => Ok(Box::new(gnome::Shell::connect()?)),
     }
 }
 
@@ -116,6 +124,7 @@ pub fn hotkeys(sink: Sink) -> Result<Box<dyn Hotkeys>> {
         }
         // Hyprland runs `appkey __hotkey <id>` itself; nothing to report back.
         Backend::Hyprland => Ok(Box::new(hyprland::HyprHotkeys::new()?)),
+        Backend::Gnome => Ok(Box::new(gnome::ShellHotkeys::new(sink)?)),
     }
 }
 
@@ -195,7 +204,22 @@ pub fn focus_pid(pid: u32) -> Result<bool> {
 pub fn diagnostics() -> Vec<String> {
     let mut out = vec![format!("Linux session: {:?}, desktop: {}", session(), desktop())];
     match backend() {
-        Ok(b) => out.push(format!("Backend: {b:?}")),
+        Ok(b) => {
+            out.push(format!("Backend: {b:?}"));
+            if b == Backend::Gnome {
+                let dirs = gnome::extension_dirs();
+                out.push(match dirs.first() {
+                    Some(d) => format!("GNOME helper extension: {}", d.display()),
+                    None => {
+                        "GNOME helper extension: not installed yet (appkey installs it on start)"
+                            .into()
+                    }
+                });
+                if let Err(e) = gnome::Shell::connect() {
+                    out.push(format!("NOT READY: {e}"));
+                }
+            }
+        }
         Err(e) => out.push(format!("NOT SUPPORTED: {e}")),
     }
     out.push(

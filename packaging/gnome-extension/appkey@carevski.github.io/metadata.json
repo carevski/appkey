@@ -1,0 +1,8 @@
+{
+  "uuid": "appkey@carevski.github.io",
+  "name": "appkey helper",
+  "description": "Lets appkey list and focus windows and register its global shortcuts on GNOME Wayland. It only acts when the appkey app asks; it has no settings or UI of its own.",
+  "url": "https://github.com/carevski/appkey",
+  "shell-version": ["45", "46", "47", "48", "49", "50"],
+  "version-name": "1"
+}

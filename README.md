@@ -44,8 +44,21 @@ ARM computers (e.g. Raspberry Pi) use the `-aarch64` files instead.
 Then start **appkey** from your applications menu. To start it automatically, add it to your desktop's
 *Startup Applications* (Mint: **Menu → Startup Applications → Add**).
 
-> **Important:** on Linux, appkey currently works with **X11** desktops. That includes Linux Mint (Cinnamon, MATE, Xfce) and any desktop you start with an "Xorg" session.
-> **Wayland** desktops are not supported yet. That includes recent Ubuntu, Fedora and KDE by default. On those, appkey tells you so instead of silently failing. Not sure which one you're using? Run `echo $XDG_SESSION_TYPE`.
+#### Which Linux desktops work
+
+| Desktop | Works | One-time setup |
+|---|---|---|
+| Any **X11** desktop: Linux Mint (Cinnamon, MATE, Xfce), or any "Xorg" session | ✅ | none |
+| **GNOME** on Wayland: Ubuntu, Fedora Workstation, Debian | ✅ | **log out and back in once** (see below) |
+| **KDE Plasma** on Wayland | ✅ | approve the shortcuts when KDE asks |
+| **Hyprland** | ✅ | none |
+| Other Wayland desktops (Sway, Cinnamon on Wayland, COSMIC, …) | ❌ not yet | appkey tells you so; use an X11 session for now |
+
+Not sure which one you're using? Run `echo $XDG_SESSION_TYPE $XDG_CURRENT_DESKTOP`.
+
+**GNOME (Ubuntu):** GNOME doesn't let apps switch to other apps' windows or register global shortcuts. appkey therefore comes with a tiny **GNOME Shell extension**, "appkey helper", that does only that, and only when appkey asks. The first time appkey starts, it installs and turns on the helper. GNOME only loads new extensions when you log in, so **log out and back in once**. Until then, the tray menu says so. You can see the helper, or turn it off, in the **Extensions** app.
+
+**KDE Plasma:** the first time appkey sets up your shortcuts, and whenever you add new ones, KDE shows a "Global Shortcuts Requested" window. Click **OK**. The shortcuts also show up in System Settings → Shortcuts, under "appkey".
 
 ---
 
@@ -141,7 +154,9 @@ On Windows, tick **Add appkey to PATH** in the installer to use these from a ter
 - **A shortcut does nothing:** open the tray menu. The top line says how many shortcuts are active and lists any that failed. Run `appkey check` to validate the config.
 - **"Shortcut unavailable":** another app already owns that combination. Pick a different one.
 - **The wrong app opens, or a second copy starts:** the `app` name doesn't match. Run `appkey list` while the app is open and copy the name exactly.
-- **Linux: "this is a Wayland session":** see the note under [Linux](#linux).
+- **Linux: "this Wayland desktop isn't supported yet":** see [Which Linux desktops work](#which-linux-desktops-work).
+- **GNOME: "appkey's GNOME helper isn't running yet":** log out and back in. If it still says so, open the **Extensions** app and make sure "appkey helper" is on (and that extensions as a whole are turned on).
+- **KDE: shortcuts do nothing:** you probably clicked **Cancel** in the "Global Shortcuts Requested" window. KDE remembers that and doesn't ask again, so assign the keys yourself in **System Settings → Shortcuts → appkey**. The tray menu points there too.
 - **Linux: no tray icon on GNOME:** install the *AppIndicator and KStatusNotifierItem Support* extension (Ubuntu has it already). Shortcuts work without the icon, and you can open settings with `appkey settings`.
 - **Linux: the settings window doesn't open:** it needs a graphics driver with OpenGL, which every normal desktop has. Run `appkey settings` in a terminal to see the error.
 

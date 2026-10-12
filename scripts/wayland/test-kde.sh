@@ -100,4 +100,20 @@ fi
 "$bin" open alpha >/dev/null; sleep 0.5
 press ctrl+alt+n; expect_active "changed shortcut works" beta
 
+
+# --- the user cancels KDE's dialog: appkey must say so, also after a restart
+# (KDE then registers the shortcut without keys and doesn't ask again).
+printf '[[shortcut]]\nkeys = "ctrl+alt+x"\napp = "beta"\n' >"$cfg"
+wait_for 20 dialog && python3 "$here/a11y.py" click Cancel
+wait_for 10 grep -q 'not approved' "$XDG_RUNTIME_DIR/daemon.log" \
+    && report ok "reports a cancelled approval" || report FAIL "cancel not reported: $(tail -2 "$XDG_RUNTIME_DIR/daemon.log")"
+pkill -f "$bin run"; sleep 1
+"$bin" run >"$XDG_RUNTIME_DIR/daemon2.log" 2>&1 &
+wait_for 15 grep -q 'shortcut(s) active' "$XDG_RUNTIME_DIR/daemon2.log"
+if grep -q '0 shortcut(s) active' "$XDG_RUNTIME_DIR/daemon2.log" && grep -q 'System Settings' "$XDG_RUNTIME_DIR/daemon2.log"; then
+    report ok "after a restart, says where to assign the keys instead of claiming success"
+else
+    report FAIL "after restart: $(cat "$XDG_RUNTIME_DIR/daemon2.log")"
+fi
+
 exit $fail

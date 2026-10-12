@@ -44,3 +44,39 @@ jobs:
       - run: cargo build --release --locked
       - run: scripts/test-x11.sh target/release/appkey
       - run: scripts/test-settings-ui.sh target/release/appkey
+
+  # Wayland desktops, each headless in a container: focusing, the setup/approval
+  # flows, and shortcuts. See scripts/wayland/.
+  linux-wayland-e2e:
+    name: wayland e2e (${{ matrix.desktop }})
+    strategy:
+      fail-fast: false
+      matrix:
+        desktop: [gnome, kde, hyprland]
+    runs-on: ubuntu-22.04 # same glibc as the release build
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --locked
+      - name: Virtual display device (Hyprland needs DRM)
+        id: vkms
+        if: matrix.desktop == 'hyprland'
+        run: |
+          if sudo modprobe vkms; then
+            sudo chmod 666 /dev/dri/card*
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning title=Hyprland e2e skipped::this runner's kernel has no vkms module"
+          fi
+      - run: docker build -t appkey-${{ matrix.desktop }} -f scripts/wayland/Containerfile.${{ matrix.desktop }} scripts/wayland
+        if: matrix.desktop != 'hyprland' || steps.vkms.outputs.ok == 'true'
+      - name: Test
+        if: matrix.desktop != 'hyprland' || steps.vkms.outputs.ok == 'true'
+        run: |
+          args=(--rm -e GITHUB_ACTIONS -v "$PWD":/src:ro -w /src)
+          case "${{ matrix.desktop }}" in
+            gnome)    docker run "${args[@]}" --user root appkey-gnome scripts/wayland/test-gnome.sh target/release/appkey ;;
+            kde)      docker run "${args[@]}" appkey-kde dbus-run-session scripts/wayland/test-kde.sh target/release/appkey ;;
+            hyprland) docker run "${args[@]}" --device /dev/dri appkey-hyprland dbus-run-session scripts/wayland/test-hyprland.sh target/release/appkey ;;
+          esac

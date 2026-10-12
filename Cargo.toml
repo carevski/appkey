@@ -83,12 +83,15 @@ depends = "libc6 (>= 2.35), libx11-6, libxcursor1, libxrandr2, libxi6, libxkbcom
 extended-description = """\
 Tray app that gives applications global keyboard shortcuts. Pressing a shortcut \
 focuses the app's most recently used window, or starts the app if it isn't running. \
-Supports X11 desktops (Cinnamon, MATE, Xfce, KDE/GNOME on Xorg)."""
+Supports X11 desktops and, on Wayland, GNOME, KDE Plasma and Hyprland."""
 assets = [
     ["target/release/appkey", "usr/bin/", "755"],
     ["packaging/linux/appkey.desktop", "usr/share/applications/", "644"],
     ["packaging/appkey.png", "usr/share/icons/hicolor/256x256/apps/", "644"],
     ["README.md", "usr/share/doc/appkey/README.md", "644"],
+    # GNOME Wayland helper; enabled by appkey on first run.
+    ["packaging/gnome-extension/appkey@carevski.github.io/metadata.json", "usr/share/gnome-shell/extensions/appkey@carevski.github.io/", "644"],
+    ["packaging/gnome-extension/appkey@carevski.github.io/extension.js", "usr/share/gnome-shell/extensions/appkey@carevski.github.io/", "644"],
 ]
 
 [package.metadata.generate-rpm]
@@ -98,4 +101,6 @@ assets = [
     { source = "packaging/appkey.png", dest = "/usr/share/icons/hicolor/256x256/apps/appkey.png", mode = "644" },
     { source = "README.md", dest = "/usr/share/doc/appkey/README.md", mode = "644", doc = true },
     { source = "LICENSE", dest = "/usr/share/licenses/appkey/LICENSE", mode = "644", doc = true },
+    { source = "packaging/gnome-extension/appkey@carevski.github.io/metadata.json", dest = "/usr/share/gnome-shell/extensions/appkey@carevski.github.io/metadata.json", mode = "644" },
+    { source = "packaging/gnome-extension/appkey@carevski.github.io/extension.js", dest = "/usr/share/gnome-shell/extensions/appkey@carevski.github.io/extension.js", mode = "644" },
 ]
