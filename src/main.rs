@@ -57,6 +57,13 @@ fn cli(args: &[String]) -> Result<()> {
         }
         ["open", app] => open(&path, app),
         ["settings"] => ui::run(path),
+        // Test helper (undocumented): the id desktops know a shortcut by.
+        ["__hotkey-id", keys] => {
+            let hotkey: global_hotkey::hotkey::HotKey =
+                keys.parse().map_err(|e| anyhow::anyhow!("{e}"))?;
+            println!("{}", hotkey.id());
+            Ok(())
+        }
         ["config"] => {
             println!("{}", path.display());
             Ok(())

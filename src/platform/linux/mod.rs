@@ -3,11 +3,15 @@
 //! | Session            | Windows (list / focus / active)      | Global shortcuts            |
 //! |--------------------|--------------------------------------|-----------------------------|
 //! | X11 (any WM)       | EWMH (`x11.rs`)                      | `XGrabKey` via global-hotkey |
+//! | Wayland: KDE       | KWin scripting (`kde.rs`)            | GlobalShortcuts portal      |
 //!
 //! Each backend implements [`WindowSystem`]; matching, most-recently-used choice
 //! and launching are shared here.
 
+mod kde;
+mod portal;
 mod x11;
+mod xkb;
 
 use std::env;
 use std::path::Path;
@@ -66,14 +70,18 @@ fn desktop() -> String {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Backend {
     X11,
+    Kde,
 }
 
 fn backend() -> Result<Backend> {
     match session() {
         Session::X11 => Ok(Backend::X11),
+        Session::Wayland if desktop().split(':').any(|d| d.eq_ignore_ascii_case("KDE")) => {
+            Ok(Backend::Kde)
+        }
         Session::Wayland => bail!(
             "this Wayland desktop ({}) isn't supported yet.\n\
-             Supported: any X11 session. Options for now:\n\
+             Supported: any X11 session; on Wayland: KDE Plasma. Options for now:\n\
              - log in with an X11/Xorg session, or\n\
              - use your desktop's own keyboard settings to run `appkey open <app>`.",
             desktop()
@@ -87,6 +95,7 @@ fn backend() -> Result<Backend> {
 fn window_system() -> Result<Box<dyn WindowSystem>> {
     match backend()? {
         Backend::X11 => Ok(Box::new(x11::X::connect()?)),
+        Backend::Kde => Ok(Box::new(kde::Kwin::connect()?)),
     }
 }
 
@@ -97,6 +106,9 @@ pub fn ensure_supported() -> Result<()> {
 pub fn hotkeys(sink: Sink) -> Result<Box<dyn Hotkeys>> {
     match backend()? {
         Backend::X11 => Ok(Box::new(GlobalHotkeys::new(sink)?)),
+        Backend::Kde => {
+            Ok(Box::new(portal::PortalHotkeys::new(sink, Some(kde::forget_stale_shortcuts))?))
+        }
     }
 }
 

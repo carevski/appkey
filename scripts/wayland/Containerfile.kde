@@ -1,0 +1,6 @@
+FROM docker.io/library/fedora:44
+RUN dnf -y install --setopt=install_weak_deps=False kwin xdg-desktop-portal xdg-desktop-portal-kde \
+    kglobalacceld foot dbus-daemon dbus-tools qt6-qttools mesa-dri-drivers libxkbcommon-x11 \
+    libXcursor libXrandr libXi fontconfig dejavu-sans-fonts procps-ng which \
+    at-spi2-core python3-pyatspi qt6-qtwayland gobject-introspection \
+    && dnf clean all

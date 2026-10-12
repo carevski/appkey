@@ -29,6 +29,10 @@ tao = { version = "0.37.1", default-features = false }
 [target.'cfg(target_os = "linux")'.dependencies]
 tray-icon = { version = "0.26.1", default-features = false, features = ["ksni"] }
 x11rb = "0.13"
+# Wayland desktops are driven over D-Bus (portal, KWin, GNOME Shell). zbus is already
+# in the tree via AccessKit; serde_json parses what desktop scripts report back.
+zbus = { version = "5.19", default-features = false, features = ["async-io", "blocking-api"] }
+serde_json = "1"
 
 # Already in the tree via tray-icon/tao; used to enumerate running apps.
 [target.'cfg(target_os = "macos")'.dependencies]
