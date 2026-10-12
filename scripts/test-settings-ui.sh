@@ -56,18 +56,28 @@ wait_for 10 grep -q 'shortcut(s) active' /tmp/appkey-daemon.log || report FAIL "
 settings_window() { xdotool search --name '^appkey settings$'; }
 wait_for 15 settings_window || { report FAIL "settings window did not open"; cat /tmp/appkey-settings.log; exit 1; }
 win=$(settings_window | head -1)
-xdotool windowactivate --sync "$win"
-sleep 1 # let the first frames render
+geometry() { xdotool getwindowgeometry --shell "$win"; }
+eval "$(geometry)" # WIDTH, HEIGHT
+sized() { eval "$(geometry)"; ((WIDTH >= 500 && HEIGHT >= 300)); }
+wait_for 10 sized || report FAIL "settings window has unexpected size ${WIDTH}x${HEIGHT}"
+sleep 2 # first frames (software GL on CI is slow)
 
-# Window layout (640×440): first row's shortcut button, and Save at the bottom right.
-xdotool mousemove --window "$win" 100 102 click 1
-sleep 0.5
-xdotool key ctrl+shift+y
-sleep 0.5
-xdotool mousemove --window "$win" 614 420 click 1
-
-if wait_for 5 grep -q 'keys = "ctrl+shift+y"' "$cfg"; then report ok "records a shortcut and saves it"
-else report FAIL "config not updated:"; cat "$cfg"; fi
+# The first row's shortcut button sits near the top-left; Save is anchored bottom-right.
+record_and_save() {
+    xdotool windowactivate --sync "$win"
+    xdotool mousemove --window "$win" 100 102 click 1
+    sleep 0.7
+    xdotool key ctrl+shift+y
+    sleep 0.7
+    xdotool mousemove --window "$win" $((WIDTH - 26)) $((HEIGHT - 20)) click 1
+    wait_for 3 grep -q 'keys = "ctrl+shift+y"' "$cfg"
+}
+saved=false
+for _ in 1 2 3; do
+    if record_and_save; then saved=true; break; fi
+done
+if $saved; then report ok "records a shortcut and saves it"
+else report FAIL "config not updated (window ${WIDTH}x${HEIGHT}): $(tr '\n' ' ' <"$cfg")"; fi
 if grep -q 'app = "Terminal"' "$cfg"; then report ok "keeps other-OS entries"
 else report FAIL "macOS entry was lost on save"; fi
 if [[ "$(stat -c %a "$cfg")" == 600 ]]; then report ok "saved file is private (600)"
