@@ -211,6 +211,10 @@ pub fn focus_pid(pid: u32) -> Result<bool> {
     Ok(app_windows().into_iter().find(|w| w.pid == pid).is_some_and(|w| activate(w.hwnd)))
 }
 
+pub fn hotkeys(sink: crate::hotkeys::Sink) -> Result<Box<dyn crate::hotkeys::Hotkeys>> {
+    Ok(Box::new(crate::hotkeys::GlobalHotkeys::new(sink)?))
+}
+
 pub fn diagnostics() -> Vec<String> {
     vec![
         "Windows: no extra permissions required.".into(),

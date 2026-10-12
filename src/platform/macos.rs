@@ -153,6 +153,10 @@ pub fn focus_pid(pid: u32) -> Result<bool> {
     ))
 }
 
+pub fn hotkeys(sink: crate::hotkeys::Sink) -> Result<Box<dyn crate::hotkeys::Hotkeys>> {
+    Ok(Box::new(crate::hotkeys::GlobalHotkeys::new(sink)?))
+}
+
 pub fn diagnostics() -> Vec<String> {
     vec!["macOS: no extra permissions required.".into()]
 }

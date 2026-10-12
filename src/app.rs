@@ -12,11 +12,11 @@ use std::process::Child;
 use std::time::{Duration, SystemTime};
 
 use anyhow::Result;
-use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 use tray_icon::menu::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 
 use crate::config::{self, Shortcut};
+use crate::hotkeys::{Hotkeys, Sink};
 use crate::platform::{self, Outcome};
 
 #[derive(Debug)]
@@ -38,7 +38,7 @@ pub enum Flow {
 
 pub struct App {
     config_path: PathBuf,
-    hotkeys: GlobalHotKeyManager,
+    hotkeys: Box<dyn Hotkeys>,
     active: HashMap<u32, Shortcut>,
     /// `None` when the desktop has no tray (e.g. no `StatusNotifier` host): shortcuts still work.
     tray: Option<TrayIcon>,
@@ -60,8 +60,8 @@ impl std::fmt::Debug for App {
 }
 
 impl App {
-    pub fn new(config_path: PathBuf) -> Result<Self> {
-        let hotkeys = GlobalHotKeyManager::new()?;
+    pub fn new(config_path: PathBuf, sink: Sink) -> Result<Self> {
+        let hotkeys = platform::hotkeys(sink)?;
         let status = MenuItem::new("appkey", false, None);
         let settings = MenuItem::new("Settings…", true, None);
         let edit = MenuItem::new("Edit config file…", true, None);
@@ -155,27 +155,20 @@ impl App {
     /// Re-reads the config and swaps the registered hotkeys. A broken config leaves
     /// no hotkeys active and says why, rather than silently keeping stale ones.
     fn reload(&mut self) {
-        for s in self.active.values() {
-            let _ = self.hotkeys.unregister(s.hotkey);
-        }
         self.active.clear();
         self.loaded_mtime = config_mtime(&self.config_path);
 
         let cfg = match config::load_or_init(&self.config_path) {
             Ok(cfg) => cfg,
-            Err(e) => return self.set_status(&format!("config error: {e:#}")),
-        };
-        let mut failed = Vec::new();
-        for s in cfg.shortcuts {
-            match self.hotkeys.register(s.hotkey) {
-                Ok(()) => {
-                    self.active.insert(s.hotkey.id(), s);
-                }
-                // Usually: another app already owns this combination.
-                Err(e) => failed.push(format!("{} ({e})", s.keys)),
+            Err(e) => {
+                self.hotkeys.set(&[]);
+                return self.set_status(&format!("config error: {e:#}"));
             }
-        }
-        let mut msg = format!("{} shortcut(s) active", self.active.len());
+        };
+        let failed = self.hotkeys.set(&cfg.shortcuts);
+        let count = cfg.shortcuts.len() - failed.len();
+        self.active = cfg.shortcuts.into_iter().map(|s| (s.hotkey.id(), s)).collect();
+        let mut msg = format!("{count} shortcut(s) active");
         if !failed.is_empty() {
             let _ = write!(msg, "; unavailable: {}", failed.join(", "));
         }
@@ -202,15 +195,12 @@ fn log(msg: &str) {
     eprintln!("appkey: {msg}");
 }
 
-/// Routes hotkey and menu callbacks (which fire on library-owned threads) into our loop.
-fn forward_events(send: impl Fn(Event) + Send + Sync + Clone + 'static) {
+/// Routes menu callbacks (fired on library-owned threads) into our loop and returns
+/// the sink hotkey backends report presses to.
+fn forward_events(send: impl Fn(Event) + Send + Sync + Clone + 'static) -> Sink {
     let on_hotkey = send.clone();
-    GlobalHotKeyEvent::set_event_handler(Some(move |e: GlobalHotKeyEvent| {
-        if e.state() == HotKeyState::Pressed {
-            on_hotkey(Event::Hotkey(e.id()));
-        }
-    }));
     MenuEvent::set_event_handler(Some(move |e: MenuEvent| send(Event::Menu(e.id))));
+    std::sync::Arc::new(move |id| on_hotkey(Event::Hotkey(id)))
 }
 
 #[cfg(any(target_os = "macos", windows))]
@@ -231,7 +221,7 @@ pub fn run(config_path: PathBuf) -> Result<()> {
     }
 
     let proxy = Arc::new(Mutex::new(event_loop.create_proxy()));
-    forward_events(move |e| {
+    let sink = forward_events(move |e| {
         if let Ok(p) = proxy.lock() {
             let _ = p.send_event(e);
         }
@@ -242,18 +232,20 @@ pub fn run(config_path: PathBuf) -> Result<()> {
         *flow = ControlFlow::WaitUntil(std::time::Instant::now() + WATCH_INTERVAL);
         match event {
             // The tray must be created once the loop is running (macOS requirement).
-            LoopEvent::NewEvents(StartCause::Init) => match App::new(config_path.clone()) {
-                Ok(mut a) => {
-                    if first_run {
-                        a.open_settings();
+            LoopEvent::NewEvents(StartCause::Init) => {
+                match App::new(config_path.clone(), sink.clone()) {
+                    Ok(mut a) => {
+                        if first_run {
+                            a.open_settings();
+                        }
+                        app = Some(a);
                     }
-                    app = Some(a);
+                    Err(e) => {
+                        eprintln!("appkey: {e:#}");
+                        std::process::exit(1);
+                    }
                 }
-                Err(e) => {
-                    eprintln!("appkey: {e:#}");
-                    std::process::exit(1);
-                }
-            },
+            }
             LoopEvent::NewEvents(StartCause::ResumeTimeReached { .. }) => {
                 if let Some(a) = app.as_mut() {
                     a.handle(Event::Tick);
@@ -276,10 +268,10 @@ pub fn run(config_path: PathBuf) -> Result<()> {
     platform::ensure_supported()?;
     let first_run = config::ensure_exists(&config_path)?;
     let (tx, rx) = std::sync::mpsc::channel();
-    forward_events(move |e| {
+    let sink = forward_events(move |e| {
         let _ = tx.send(e);
     });
-    let mut app = App::new(config_path)?;
+    let mut app = App::new(config_path, sink)?;
     if first_run {
         app.open_settings();
     }

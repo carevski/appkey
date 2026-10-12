@@ -7,6 +7,7 @@
 //! - `frontmost_app() -> Result<Option<AppInfo>>`: the focused app, if it isn't us
 //! - `focus_pid(pid) -> Result<bool>`: bring a process's window forward (our settings window)
 //! - `diagnostics() -> Vec<String>`: environment/permission notes for `appkey check`
+//! - `hotkeys(sink) -> Result<Box<dyn Hotkeys>>`: the shortcut mechanism for this desktop
 //! - `ensure_supported() -> Result<()>`: fail early in environments we can't drive
 //! - `open_in_editor(&Path) -> Result<()>`
 

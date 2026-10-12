@@ -3,6 +3,7 @@
 
 mod app;
 mod config;
+mod hotkeys;
 mod matcher;
 mod platform;
 mod ui;

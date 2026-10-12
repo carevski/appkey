@@ -6,10 +6,25 @@ use std::path::{Path, PathBuf};
 
 use super::AppInfo;
 
+/// An installed app plus every name its windows might report: the desktop file id
+/// (Wayland apps usually use it as their app id), `StartupWMClass` and the program name.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DesktopApp {
+    pub info: AppInfo,
+    pub ids: Vec<String>,
+}
+
+impl std::ops::Deref for DesktopApp {
+    type Target = AppInfo;
+    fn deref(&self) -> &AppInfo {
+        &self.info
+    }
+}
+
 /// Parses one `.desktop` file. `id` is the file name without `.desktop`
 /// (e.g. `org.mozilla.firefox`). Returns `None` for entries that aren't
 /// launchable, visible GUI applications.
-pub fn parse(text: &str, id: &str) -> Option<AppInfo> {
+pub fn parse(text: &str, id: &str) -> Option<DesktopApp> {
     let mut in_entry = false;
     let mut kv = BTreeMap::new();
     for line in text.lines().map(str::trim) {
@@ -47,7 +62,13 @@ pub fn parse(text: &str, id: &str) -> Option<AppInfo> {
         _ if matches!(program_name, "env" | "flatpak" | "sh" | "bash") => id.to_owned(),
         _ => program_name.to_owned(),
     };
-    Some(AppInfo { name, app, launch: Some(launch) })
+    let mut ids: Vec<String> = Vec::new();
+    for candidate in [app.as_str(), id, program_name] {
+        if !ids.iter().any(|i| i == candidate) {
+            ids.push(candidate.to_owned());
+        }
+    }
+    Some(DesktopApp { info: AppInfo { name, app, launch: Some(launch) }, ids })
 }
 
 /// Splits an `Exec=` value into argv: honours double quotes and backslash
@@ -104,8 +125,8 @@ pub fn search_dirs() -> Vec<PathBuf> {
 }
 
 /// All visible apps in `dirs`. Earlier directories win for the same desktop id.
-pub fn scan(dirs: &[PathBuf]) -> Vec<AppInfo> {
-    let mut by_id: BTreeMap<String, AppInfo> = BTreeMap::new();
+pub fn scan(dirs: &[PathBuf]) -> Vec<DesktopApp> {
+    let mut by_id: BTreeMap<String, DesktopApp> = BTreeMap::new();
     for dir in dirs {
         let mut files = Vec::new();
         collect(dir, dir, &mut files);
@@ -118,7 +139,7 @@ pub fn scan(dirs: &[PathBuf]) -> Vec<AppInfo> {
             by_id.insert(id, info.unwrap_or_default());
         }
     }
-    let mut apps: Vec<AppInfo> = by_id.into_values().filter(|a| !a.app.is_empty()).collect();
+    let mut apps: Vec<DesktopApp> = by_id.into_values().filter(|a| !a.app.is_empty()).collect();
     apps.sort_by_key(|a| a.name.to_lowercase());
     apps
 }
@@ -163,7 +184,12 @@ mod tests {
                        Exec=firefox %u\n\n[Desktop Action new-window]\nName=New Window\nExec=firefox --new-window\n";
         let a = parse(firefox, "firefox").unwrap();
         assert_eq!((a.name.as_str(), a.app.as_str()), ("Firefox", "firefox"));
-        assert_eq!(a.launch.unwrap(), ["firefox"]);
+        assert_eq!(a.launch.as_deref().unwrap(), ["firefox"]);
+        let term = "[Desktop Entry]\nType=Application\nName=Terminal\nExec=gnome-terminal\n";
+        assert_eq!(
+            parse(term, "org.gnome.Terminal").unwrap().ids,
+            ["gnome-terminal", "org.gnome.Terminal"]
+        );
 
         let code = "[Desktop Entry]\nType=Application\nName=Code\nExec=/usr/share/code/code %F\nStartupWMClass=Code\n";
         assert_eq!(parse(code, "code").unwrap().app, "Code");
@@ -189,7 +215,7 @@ mod tests {
         std::fs::write(system.join("a.desktop"), entry("System A")).unwrap();
         std::fs::write(user.join("sub/b.desktop"), entry("B")).unwrap();
         std::fs::write(system.join("hidden.desktop"), "[Desktop Entry]\nNoDisplay=true").unwrap();
-        let names: Vec<String> = scan(&[user, system]).into_iter().map(|a| a.name).collect();
+        let names: Vec<String> = scan(&[user, system]).into_iter().map(|a| a.info.name).collect();
         assert_eq!(names, ["B", "User A"]);
         std::fs::remove_dir_all(base).unwrap();
     }
