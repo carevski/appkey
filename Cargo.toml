@@ -1,0 +1,91 @@
+[package]
+name = "appkey"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT"
+repository = "https://github.com/carevski/appkey"
+description = "Global keyboard shortcuts that open an app, or focus it if it's already running."
+publish = false
+
+[dependencies]
+anyhow = "1.0.104"
+dirs = "7.0.0"
+global-hotkey = "0.8.0"
+serde = { version = "1.0.229", features = ["derive"] }
+toml = { version = "1.1.8", default-features = false, features = ["parse", "serde"] }
+# Backends are picked per-OS below; default (GTK/libappindicator) is disabled on purpose.
+tray-icon = { version = "0.26.1", default-features = false }
+
+# macOS + Windows need a native event loop on the main thread for hotkeys and the tray.
+[target.'cfg(any(target_os = "macos", windows))'.dependencies]
+tao = { version = "0.37.1", default-features = false }
+
+# Linux: pure Rust, no GTK. Hotkeys run on global-hotkey's own X11 thread; the tray
+# uses StatusNotifierItem over D-Bus (ksni). Keep x11rb on the same minor as global-hotkey.
+[target.'cfg(target_os = "linux")'.dependencies]
+tray-icon = { version = "0.26.1", default-features = false, features = ["ksni"] }
+x11rb = "0.13"
+
+# Already in the tree via tray-icon/tao; used to enumerate running apps.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSRunningApplication", "NSWorkspace"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSArray", "NSString", "NSURL"] }
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62.2", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Dwm",
+    "Win32_System_Console",
+    "Win32_System_Threading",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+missing_debug_implementations = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+undocumented_unsafe_blocks = "warn"
+unwrap_used = "warn"
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+
+# "Super small" is a feature: optimize release builds for size.
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+# ---- Packaging (used by scripts/package-linux.sh; versions are set by CI) ----
+
+[package.metadata.deb]
+maintainer = "Vladimir Carevski <carevski@gmail.com>"
+copyright = "Vladimir Carevski"
+section = "utils"
+priority = "optional"
+# Statically linked (musl) — no runtime dependencies.
+depends = ""
+extended-description = """\
+Tray app that gives applications global keyboard shortcuts. Pressing a shortcut \
+focuses the app's most recently used window, or starts the app if it isn't running. \
+Supports X11 desktops (Cinnamon, MATE, Xfce, KDE/GNOME on Xorg)."""
+assets = [
+    ["target/release/appkey", "usr/bin/", "755"],
+    ["packaging/linux/appkey.desktop", "usr/share/applications/", "644"],
+    ["packaging/appkey.png", "usr/share/icons/hicolor/256x256/apps/", "644"],
+    ["README.md", "usr/share/doc/appkey/README.md", "644"],
+]
+
+[package.metadata.generate-rpm]
+assets = [
+    { source = "target/release/appkey", dest = "/usr/bin/appkey", mode = "755" },
+    { source = "packaging/linux/appkey.desktop", dest = "/usr/share/applications/appkey.desktop", mode = "644" },
+    { source = "packaging/appkey.png", dest = "/usr/share/icons/hicolor/256x256/apps/appkey.png", mode = "644" },
+    { source = "README.md", dest = "/usr/share/doc/appkey/README.md", mode = "644", doc = true },
+    { source = "LICENSE", dest = "/usr/share/licenses/appkey/LICENSE", mode = "644", doc = true },
+]

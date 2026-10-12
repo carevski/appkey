@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=appkey
+GenericName=App shortcuts
+Comment=Global shortcuts that open or focus your apps
+Exec=appkey
+Icon=appkey
+Terminal=false
+Categories=Utility;
+Keywords=shortcut;hotkey;keyboard;launcher;focus;

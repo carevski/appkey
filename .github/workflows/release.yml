@@ -1,0 +1,144 @@
+name: Release
+
+# Every push to main → CI → installers for every platform → a GitHub Release.
+# Version = MAJOR.MINOR from Cargo.toml + this workflow's run number (e.g. 0.1.42).
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        run: echo "version=$(scripts/release-version.sh ${{ github.run_number }})" >> "$GITHUB_OUTPUT"
+
+  linux:
+    needs: [ci, version]
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+    runs-on: ${{ matrix.runner }}
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deb,cargo-generate-rpm
+      - run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - run: scripts/set-version.sh "$VERSION"
+      - run: scripts/package-linux.sh "$VERSION"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-linux-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  macos:
+    needs: [ci, version]
+    runs-on: macos-latest
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - run: scripts/set-version.sh "$VERSION"
+      - run: scripts/package-macos.sh "$VERSION"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-macos
+          path: dist/*
+          if-no-files-found: error
+
+  windows:
+    needs: [ci, version]
+    runs-on: windows-latest
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Inno Setup
+        run: choco install innosetup --no-progress -y
+      - run: scripts/set-version.sh "$VERSION"
+        shell: bash
+      - run: scripts/package-windows.ps1 -Version $env:VERSION
+        shell: pwsh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-windows
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    needs: [version, linux, macos, windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        working-directory: dist
+        run: sha256sum -- * > SHA256SUMS.txt && cat SHA256SUMS.txt
+      - name: Create release
+        run: |
+          cat > notes.md <<EOF
+          ## Downloads
+
+          | System | File |
+          |---|---|
+          | **Windows** (installer) | \`appkey-$VERSION-windows-x64-setup.exe\` |
+          | Windows (portable) | \`appkey-$VERSION-windows-x64.zip\` |
+          | **macOS** (Apple Silicon + Intel) | \`appkey-$VERSION-macos-universal.dmg\` |
+          | **Debian / Ubuntu / Mint** | \`appkey-$VERSION-linux-x86_64.deb\` (ARM: \`-aarch64.deb\`) |
+          | **Fedora / openSUSE / RHEL** | \`appkey-$VERSION-linux-x86_64.rpm\` (ARM: \`-aarch64.rpm\`) |
+          | Any Linux (Arch, …) | \`appkey-$VERSION-linux-x86_64.tar.gz\` (ARM: \`-aarch64.tar.gz\`) |
+
+          See the [README](https://github.com/${{ github.repository }}#install) for install steps.
+          EOF
+          gh release create "v$VERSION" dist/* \
+            --repo "${{ github.repository }}" \
+            --target "${{ github.sha }}" \
+            --title "appkey $VERSION" \
+            --notes-file notes.md \
+            --generate-notes
