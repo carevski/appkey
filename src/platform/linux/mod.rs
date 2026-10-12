@@ -4,10 +4,12 @@
 //! |--------------------|--------------------------------------|-----------------------------|
 //! | X11 (any WM)       | EWMH (`x11.rs`)                      | `XGrabKey` via global-hotkey |
 //! | Wayland: KDE       | KWin scripting (`kde.rs`)            | GlobalShortcuts portal      |
+//! | Wayland: Hyprland  | IPC socket (`hyprland.rs`)           | runtime `bind` → `appkey __hotkey` |
 //!
 //! Each backend implements [`WindowSystem`]; matching, most-recently-used choice
 //! and launching are shared here.
 
+mod hyprland;
 mod kde;
 mod portal;
 mod x11;
@@ -71,6 +73,7 @@ fn desktop() -> String {
 enum Backend {
     X11,
     Kde,
+    Hyprland,
 }
 
 fn backend() -> Result<Backend> {
@@ -79,9 +82,10 @@ fn backend() -> Result<Backend> {
         Session::Wayland if desktop().split(':').any(|d| d.eq_ignore_ascii_case("KDE")) => {
             Ok(Backend::Kde)
         }
+        Session::Wayland if var("HYPRLAND_INSTANCE_SIGNATURE").is_some() => Ok(Backend::Hyprland),
         Session::Wayland => bail!(
             "this Wayland desktop ({}) isn't supported yet.\n\
-             Supported: any X11 session; on Wayland: KDE Plasma. Options for now:\n\
+             Supported: any X11 session; on Wayland: KDE Plasma, Hyprland. Options for now:\n\
              - log in with an X11/Xorg session, or\n\
              - use your desktop's own keyboard settings to run `appkey open <app>`.",
             desktop()
@@ -96,6 +100,7 @@ fn window_system() -> Result<Box<dyn WindowSystem>> {
     match backend()? {
         Backend::X11 => Ok(Box::new(x11::X::connect()?)),
         Backend::Kde => Ok(Box::new(kde::Kwin::connect()?)),
+        Backend::Hyprland => Ok(Box::new(hyprland::Hypr::connect()?)),
     }
 }
 
@@ -109,6 +114,8 @@ pub fn hotkeys(sink: Sink) -> Result<Box<dyn Hotkeys>> {
         Backend::Kde => {
             Ok(Box::new(portal::PortalHotkeys::new(sink, Some(kde::forget_stale_shortcuts))?))
         }
+        // Hyprland runs `appkey __hotkey <id>` itself; nothing to report back.
+        Backend::Hyprland => Ok(Box::new(hyprland::HyprHotkeys::new()?)),
     }
 }
 

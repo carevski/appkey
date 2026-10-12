@@ -9,7 +9,8 @@ set -uo pipefail
 bin="$(realpath "${1:?usage: $0 path/to/appkey}")"
 here="$(dirname "$(realpath "$0")")"
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-$(mktemp -d)}"; chmod 700 "$XDG_RUNTIME_DIR"
-export HOME="$(mktemp -d)" XDG_SESSION_TYPE=wayland XDG_CURRENT_DESKTOP=KDE
+HOME="$(mktemp -d)"
+export HOME XDG_SESSION_TYPE=wayland XDG_CURRENT_DESKTOP=KDE
 export QT_FORCE_STDERR_LOGGING=1 QT_LOGGING_RULES="*.debug=false;js.debug=true"
 
 fail=0
@@ -59,7 +60,8 @@ window alpha alpha-2
 window beta beta
 sleep 1
 
-"$bin" check 2>&1 | grep -q 'Backend: Kde' && report ok "detects KDE Wayland" || report FAIL "backend not detected: $("$bin" check 2>&1 | tail -2)"
+checked=$("$bin" check 2>&1)
+[[ "$checked" == *"Backend: Kde"* ]] && report ok "detects KDE Wayland" || report FAIL "backend not detected: $checked"
 "$bin" open alpha >/dev/null; expect_active "focuses most recent of several windows" alpha-2
 "$bin" open beta >/dev/null;  expect_active "switches to another app" beta
 "$bin" open alpha >/dev/null; expect_active "follows most-recently-used order" alpha-2

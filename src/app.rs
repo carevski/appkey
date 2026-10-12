@@ -263,7 +263,16 @@ pub fn run(config_path: PathBuf) -> Result<()> {
 
 #[cfg(target_os = "linux")]
 pub fn run(config_path: PathBuf) -> Result<()> {
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc::RecvTimeoutError;
+
+    // Shut down cleanly on logout/kill so desktop-side state (e.g. Hyprland binds)
+    // is removed: the loop notices within WATCH_INTERVAL and drops `App`.
+    static STOP: AtomicBool = AtomicBool::new(false);
+    for signal in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP] {
+        // SAFETY: the handler only stores to an atomic, which is async-signal-safe.
+        unsafe { signal_hook_registry::register(signal, || STOP.store(true, Ordering::SeqCst))? };
+    }
 
     platform::ensure_supported()?;
     let first_run = config::ensure_exists(&config_path)?;
@@ -275,7 +284,7 @@ pub fn run(config_path: PathBuf) -> Result<()> {
     if first_run {
         app.open_settings();
     }
-    loop {
+    while !STOP.load(Ordering::SeqCst) {
         let event = match rx.recv_timeout(WATCH_INTERVAL) {
             Ok(e) => e,
             Err(RecvTimeoutError::Timeout) => Event::Tick,

@@ -1,0 +1,7 @@
+FROM docker.io/library/debian:sid
+RUN apt-get -qq update && apt-get -qq install -y --no-install-recommends hyprland foot wtype dbus dbus-user-session \
+    libglib2.0-bin python3 mesa-utils libgl1-mesa-dri libegl1 binutils procps ca-certificates fonts-dejavu-core >/dev/null \
+    && rm -rf /var/lib/apt/lists/*
+RUN useradd -m -u 1000 tester
+USER tester
+WORKDIR /home/tester

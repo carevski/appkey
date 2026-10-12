@@ -103,7 +103,6 @@ impl Combo {
     }
 
     /// Hyprland `bind` modifiers: `CTRL ALT`.
-    #[allow(dead_code)] // used by the Hyprland backend (next step)
     pub fn hyprland_mods(&self) -> String {
         let mut parts = Vec::new();
         for (on, name) in

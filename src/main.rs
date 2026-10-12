@@ -57,6 +57,8 @@ fn cli(args: &[String]) -> Result<()> {
         }
         ["open", app] => open(&path, app),
         ["settings"] => ui::run(path),
+        // Run by desktops that execute a command per shortcut (Hyprland binds).
+        ["__hotkey", id] => run_hotkey(&path, id),
         // Test helper (undocumented): the id desktops know a shortcut by.
         ["__hotkey-id", keys] => {
             let hotkey: global_hotkey::hotkey::HotKey =
@@ -92,6 +94,17 @@ fn check(path: &Path) -> Result<()> {
         println!("{note}");
     }
     platform::ensure_supported()
+}
+
+/// Does what the shortcut with this `HotKey` id is configured to do.
+fn run_hotkey(path: &Path, id: &str) -> Result<()> {
+    let id: u32 = id.parse()?;
+    let cfg = config::load_or_init(path)?;
+    let Some(s) = cfg.shortcuts.iter().find(|s| s.hotkey.id() == id) else {
+        bail!("no shortcut with id {id} in the config");
+    };
+    platform::focus_or_launch(&s.app, s.launch.as_deref())?;
+    Ok(())
 }
 
 /// Uses the config's `launch` for this app if there is one, so `open` behaves like the hotkey.
