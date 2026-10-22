@@ -175,3 +175,63 @@ impl WindowSystem for Kwin {
         Ok(serde_json::from_str::<Option<KWindow>>(&json)?.map(Win::from))
     }
 }
+
+/// One `KGlobalShortcutInfo`: action, component and context names (unique, friendly
+/// each), then active and default keys. Plasma 5 sends each key as an `int`…
+type InfoV5 = (String, String, String, String, String, String, Vec<i32>, Vec<i32>);
+/// …Plasma 6 as a key sequence: a struct of up to four `int`s, or a bare array.
+type InfoV6 = (String, String, String, String, String, String, Vec<(Vec<i32>,)>, Vec<(Vec<i32>,)>);
+type InfoV6Bare = (String, String, String, String, String, String, Vec<Vec<i32>>, Vec<Vec<i32>>);
+
+/// `(component, action, active key sequences)` from one `allShortcutInfos` reply.
+fn shortcut_infos(body: &zbus::message::Body) -> Vec<(String, String, Vec<Vec<i32>>)> {
+    if let Ok(v) = body.deserialize::<Vec<InfoV5>>() {
+        return v
+            .into_iter()
+            .map(|i| (i.2, i.1, i.6.into_iter().map(|k| vec![k]).collect()))
+            .collect();
+    }
+    if let Ok(v) = body.deserialize::<Vec<InfoV6>>() {
+        return v
+            .into_iter()
+            .map(|i| (i.2, i.1, i.6.into_iter().map(|(k,)| k).collect()))
+            .collect();
+    }
+    body.deserialize::<Vec<InfoV6Bare>>()
+        .map(|v| v.into_iter().map(|i| (i.2, i.1, i.6)).collect())
+        .unwrap_or_default()
+}
+
+/// Every global shortcut KDE components hold (KWin, Plasma, apps), except appkey's own.
+pub(super) fn reserved() -> Vec<(u32, String)> {
+    let Ok(conn) = Connection::session() else { return Vec::new() };
+    let call = |path: &str, iface: &str, method: &str| {
+        conn.call_method(Some("org.kde.kglobalaccel"), path, Some(iface), method, &())
+    };
+    let Ok(reply) = call("/kglobalaccel", "org.kde.KGlobalAccel", "allComponents") else {
+        return Vec::new();
+    };
+    let paths: Vec<zbus::zvariant::OwnedObjectPath> =
+        reply.body().deserialize().unwrap_or_default();
+    let mut found = Vec::new();
+    for path in paths {
+        let Ok(reply) = call(path.as_str(), "org.kde.kglobalaccel.Component", "allShortcutInfos")
+        else {
+            continue;
+        };
+        for (component, action, sequences) in shortcut_infos(&reply.body()) {
+            if component == super::portal::APP_ID {
+                continue;
+            }
+            // Only single-key sequences can clash with a global shortcut; 0 pads unused slots.
+            for seq in sequences {
+                if let [code] = seq.iter().copied().filter(|&c| c != 0).collect::<Vec<_>>()[..]
+                    && let Some(keys) = super::xkb::from_qt(code)
+                {
+                    found.push((keys, action.clone()));
+                }
+            }
+        }
+    }
+    super::reserved::to_ids(found, "KDE")
+}

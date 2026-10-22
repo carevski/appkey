@@ -116,4 +116,14 @@ else
     report FAIL "after restart: $(cat "$XDG_RUNTIME_DIR/daemon2.log")"
 fi
 
+# --- a combo KDE itself uses (KWin's Alt+F4) is reported, not registered
+pkill -f "$bin run"; sleep 1
+printf '[[shortcut]]\nkeys = "alt+f4"\napp = "beta"\n' >"$cfg"
+"$bin" run >"$XDG_RUNTIME_DIR/daemon3.log" 2>&1 &
+if wait_for 15 grep -q 'alt+f4 (used by KDE' "$XDG_RUNTIME_DIR/daemon3.log"; then
+    report ok "reports a combo KDE already uses"
+else
+    report FAIL "KWin's Alt+F4 not reported: $(cat "$XDG_RUNTIME_DIR/daemon3.log")"
+fi
+
 exit $fail

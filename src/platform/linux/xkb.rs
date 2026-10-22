@@ -107,6 +107,57 @@ pub fn from_gtk(accel: &str) -> Option<String> {
     Some(mods.into_iter().map(str::to_owned).chain([key]).collect::<Vec<_>>().join("+"))
 }
 
+/// A Qt key code (`Qt::Key | Qt::KeyboardModifier`, as KDE's kglobalaccel reports
+/// shortcuts) → config `keys`. `None` for keys a shortcut can't use (media keys…).
+pub fn from_qt(code: i32) -> Option<String> {
+    const SHIFT: i32 = 0x0200_0000;
+    const CTRL: i32 = 0x0400_0000;
+    const ALT: i32 = 0x0800_0000;
+    const META: i32 = 0x1000_0000;
+    let key = code & 0x01ff_ffff;
+    let name = match key {
+        0x30..=0x39 | 0x41..=0x5a => {
+            char::from(u8::try_from(key).ok()?).to_ascii_lowercase().to_string()
+        }
+        0x0100_0030..=0x0100_0047 => format!("f{}", key - 0x0100_0030 + 1),
+        0x20 => "space".into(),
+        0x27 => "quote".into(),
+        0x2c => "comma".into(),
+        0x2d => "minus".into(),
+        0x2e => "period".into(),
+        0x2f => "slash".into(),
+        0x3b => "semicolon".into(),
+        0x3d => "equal".into(),
+        0x5b => "bracketleft".into(),
+        0x5c => "backslash".into(),
+        0x5d => "bracketright".into(),
+        0x60 => "backquote".into(),
+        0x0100_0000 => "escape".into(),
+        0x0100_0001 => "tab".into(),
+        0x0100_0003 => "backspace".into(),
+        0x0100_0004 | 0x0100_0005 => "enter".into(),
+        0x0100_0006 => "insert".into(),
+        0x0100_0007 => "delete".into(),
+        0x0100_0009 => "printscreen".into(),
+        0x0100_0010 => "home".into(),
+        0x0100_0011 => "end".into(),
+        0x0100_0012 => "left".into(),
+        0x0100_0013 => "up".into(),
+        0x0100_0014 => "right".into(),
+        0x0100_0015 => "down".into(),
+        0x0100_0016 => "pageup".into(),
+        0x0100_0017 => "pagedown".into(),
+        _ => return None,
+    };
+    let mut parts: Vec<String> = [(CTRL, "ctrl"), (ALT, "alt"), (SHIFT, "shift"), (META, "super")]
+        .iter()
+        .filter(|(bit, _)| code & bit != 0)
+        .map(|(_, m)| (*m).to_owned())
+        .collect();
+    parts.push(name);
+    Some(parts.join("+"))
+}
+
 impl Combo {
     /// XDG shortcuts spec, used by the GlobalShortcuts portal: `CTRL+ALT+t`.
     pub fn portal(&self) -> String {
@@ -188,6 +239,18 @@ mod tests {
         for keys in ["ctrl+alt+t", "super+i", "shift+super+f5"] {
             assert_eq!(from_gtk(&parse(keys).unwrap().gtk()).as_deref(), Some(keys));
         }
+    }
+
+    #[test]
+    fn reads_qt_key_codes() {
+        assert_eq!(from_qt(0x1000_0044).as_deref(), Some("super+d")); // Meta+D
+        assert_eq!(from_qt(0x0C00_0054).as_deref(), Some("ctrl+alt+t")); // Ctrl+Alt+T
+        assert_eq!(from_qt(0x1300_0012).as_deref(), Some("shift+super+left"));
+        assert_eq!(from_qt(0x0800_0000 | 0x0100_0033).as_deref(), Some("alt+f4"));
+        assert_eq!(from_qt(0x1000_0031).as_deref(), Some("super+1"));
+        assert_eq!(from_qt(0x0100_0009).as_deref(), Some("printscreen"));
+        assert_eq!(from_qt(0x0100_0072), None, "Volume Mute");
+        assert_eq!(from_qt(0), None);
     }
 
     #[test]

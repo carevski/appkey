@@ -120,6 +120,8 @@ fn reserved_lookup() -> Option<reserved::Lookup> {
         Some(cinnamon::reserved)
     } else if desktop_is(&["GNOME"]) {
         Some(gnome::reserved)
+    } else if desktop_is(&["KDE"]) {
+        Some(kde::reserved)
     } else {
         None
     }
@@ -233,7 +235,7 @@ pub fn focus_pid(pid: u32) -> Result<bool> {
     }
 }
 
-/// Shortcuts the desktop itself uses (Cinnamon, GNOME), as `(HotKey id, "GNOME: Show
+/// Shortcuts the desktop itself uses (Cinnamon, GNOME, KDE), as `(HotKey id, "GNOME: Show
 /// desktop")`, so the settings window can warn before one is picked.
 pub fn desktop_shortcuts() -> Vec<(u32, String)> {
     reserved_lookup().map(|lookup| lookup()).unwrap_or_default()
