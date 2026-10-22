@@ -10,6 +10,7 @@
 //! Each backend implements [`WindowSystem`]; matching, most-recently-used choice
 //! and launching are shared here.
 
+mod cinnamon;
 mod gnome;
 mod hyprland;
 mod kde;
@@ -103,6 +104,12 @@ fn backend() -> Result<Backend> {
     }
 }
 
+fn is_cinnamon() -> bool {
+    desktop()
+        .split(':')
+        .any(|d| d.eq_ignore_ascii_case("X-Cinnamon") || d.eq_ignore_ascii_case("Cinnamon"))
+}
+
 fn window_system() -> Result<Box<dyn WindowSystem>> {
     match backend()? {
         Backend::X11 => Ok(Box::new(x11::X::connect()?)),
@@ -118,6 +125,8 @@ pub fn ensure_supported() -> Result<()> {
 
 pub fn hotkeys(sink: Sink) -> Result<Box<dyn Hotkeys>> {
     match backend()? {
+        // Cinnamon's menu swallows Super; those shortcuts go through Cinnamon itself.
+        Backend::X11 if is_cinnamon() => Ok(Box::new(cinnamon::CinnamonHotkeys::new(sink)?)),
         Backend::X11 => Ok(Box::new(GlobalHotkeys::new(sink)?)),
         Backend::Kde => {
             Ok(Box::new(portal::PortalHotkeys::new(sink, Some(kde::forget_stale_shortcuts))?))
@@ -199,6 +208,12 @@ pub fn focus_pid(pid: u32) -> Result<bool> {
         Some(w) => ws.activate(&w).map(|()| true),
         None => Ok(false),
     }
+}
+
+/// Super held right now, for the shortcut recorder when the desktop swallowed the key's
+/// own press. Only X11 can tell; Wayland doesn't expose other keys' state.
+pub fn logo_key_down() -> bool {
+    session() == Session::X11 && x11::logo_key_down()
 }
 
 pub fn diagnostics() -> Vec<String> {

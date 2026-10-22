@@ -137,7 +137,7 @@ fn enable() -> Result<()> {
 }
 
 /// `['a', 'b']` or `@as []` → `["a", "b"]`. Extension uuids contain no quotes.
-fn parse_gvariant_strv(s: &str) -> Vec<String> {
+pub(super) fn parse_gvariant_strv(s: &str) -> Vec<String> {
     s.trim_start_matches("@as")
         .trim()
         .trim_start_matches('[')

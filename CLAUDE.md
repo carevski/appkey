@@ -28,7 +28,7 @@ Every push to `main` runs `.github/workflows/release.yml`: CI → installers on 
 - `src/config.rs`: TOML config: path, parsing, validation, example. Most unit tests live here.
 - `src/matcher.rs`: how a configured `app` name is compared to what the OS reports
 - `src/platform/{macos,windows}.rs`, `src/platform/linux/`: one backend per OS, **same public functions in each** (listed in `platform/mod.rs`). `desktop_entry.rs` / `lnk.rs` are pure parsers compiled for tests on every host.
-- `src/platform/linux/`: `mod.rs` picks a backend per session/desktop. `x11.rs`, `gnome.rs` (+ `packaging/gnome-extension/`), `kde.rs`, `hyprland.rs` implement `WindowSystem`. `portal.rs` = GlobalShortcuts portal, `xkb.rs` = key syntax conversions. See the table in docs/DESIGN.md.
+- `src/platform/linux/`: `mod.rs` picks a backend per session/desktop. `x11.rs`, `gnome.rs` (+ `packaging/gnome-extension/`), `kde.rs`, `hyprland.rs` implement `WindowSystem`. `cinnamon.rs` = Super shortcuts as Cinnamon custom keybindings (X11 windows otherwise). `portal.rs` = GlobalShortcuts portal, `xkb.rs` = key syntax conversions. See the table in docs/DESIGN.md.
 - `src/memory/`: Ubuntu/Mint only: low-memory detection (`/proc/meminfo`, PSI), grouping and signalling the user's processes, Magic SysRq (`sysrq.rs`). Parsers compile on every host for tests. UI: `ui/memory.rs` (settings tab), `ui/pressure.rs` (`appkey memory [--alert]` window)
 - `src/hotkeys.rs`: `Hotkeys` trait; global-hotkey on macOS/Windows/X11, desktop-specific ones on Wayland
 
@@ -52,6 +52,7 @@ Every push to `main` runs `.github/workflows/release.yml`: CI → installers on 
 - `global-hotkey` and the tray must be created on the main thread *after* the tao loop starts (`StartCause::Init`).
 - egui 0.36 API differs from older docs and examples: `App::ui(&mut self, ui, frame)`, `egui::Panel::top/bottom(..).show(ui, ..)`, `run_ui_native`. Read the crate source in `~/.cargo/registry` when unsure.
 - Wayland gotchas (all hit and fixed once, keep them fixed): KDE keeps old portal shortcut ids grabbed (we unregister), and after a cancelled dialog it binds with no keys (we check `trigger_description`). GNOME restores focus after the overview hides (re-activate), and Mutter sometimes needs a second `activate`. Hyprland drops runtime binds on reload (re-apply). Portals need our `.desktop` file registered. Test env: `kwin_wayland` must be copied (file caps), GNOME Shell needs a system bus + mock logind, Hyprland needs `vkms` and ignores virtual keyboards for binds.
+- Cinnamon swallows Super (menu): `XGrabKey` with Mod4 never fires and the settings window never sees the Super press. Super combos go through Cinnamon custom keybindings whose ids must contain "custom", or Cinnamon never unbinds them. Reproduce with a real `cinnamon --replace` on Xvfb (`apt install cinnamon`), not Openbox.
 - On Linux, winit panics (not errors) if `libxkbcommon-x11` is missing. The `.deb` depends on it, and e2e environments must install it.
 - X11: always do a round-trip (`get_input_focus().reply()`) before dropping a connection that sent requests. Otherwise the server may discard them on disconnect, and focus fails at random. Send real server timestamps with `_NET_ACTIVE_WINDOW`.
 - On Linux keep `x11rb` on the same minor version as `global-hotkey` uses (currently 0.13) to avoid two copies.

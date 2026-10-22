@@ -211,6 +211,11 @@ pub fn focus_pid(pid: u32) -> Result<bool> {
     Ok(app_windows().into_iter().find(|w| w.pid == pid).is_some_and(|w| activate(w.hwnd)))
 }
 
+/// The settings window sees the Win key's own events, so there's nothing to add.
+pub fn logo_key_down() -> bool {
+    false
+}
+
 pub fn hotkeys(sink: crate::hotkeys::Sink) -> Result<Box<dyn crate::hotkeys::Hotkeys>> {
     Ok(Box::new(crate::hotkeys::GlobalHotkeys::new(sink)?))
 }

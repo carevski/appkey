@@ -10,13 +10,24 @@ use anyhow::{Context, Result, bail};
 use x11rb::connection::Connection;
 use x11rb::protocol::Event;
 use x11rb::protocol::xproto::{
-    Atom, AtomEnum, ClientMessageEvent, ConnectionExt, CreateWindowAux, EventMask, PropMode,
-    Timestamp, Window, WindowClass,
+    Atom, AtomEnum, ClientMessageEvent, ConnectionExt, CreateWindowAux, EventMask, KeyButMask,
+    PropMode, Timestamp, Window, WindowClass,
 };
 use x11rb::rust_connection::RustConnection;
 use x11rb::wrapper::ConnectionExt as _;
 
 use super::{Win, WindowSystem};
+
+/// Whether Super (Mod4) is held right now, from the server's keyboard state. Cinnamon
+/// (Muffin) grabs the Super key's own press for its menu, so our window never sees it.
+pub(super) fn logo_key_down() -> bool {
+    let Ok((conn, screen)) = x11rb::connect(None) else { return false };
+    let root = conn.setup().roots[screen].root;
+    conn.query_pointer(root)
+        .ok()
+        .and_then(|c| c.reply().ok())
+        .is_some_and(|r| r.mask.contains(KeyButMask::MOD4))
+}
 
 pub(super) struct X {
     conn: RustConnection,
@@ -42,18 +53,24 @@ impl X {
 
     /// Managed windows, most recently used first (falls back to mapping order).
     fn windows_mru(&self) -> Result<Vec<Window>> {
+        // A published but empty list just means no windows are open (yet).
+        let mut published = false;
         for prop in [self.stacking, self.client_list] {
             let reply = self
                 .conn
                 .get_property(false, self.root, prop, AtomEnum::WINDOW, 0, u32::MAX)?
                 .reply()?;
             if let Some(list) = reply.value32() {
+                published = true;
                 let mut list: Vec<Window> = list.collect();
                 list.reverse();
                 if !list.is_empty() {
                     return Ok(list);
                 }
             }
+        }
+        if published {
+            return Ok(Vec::new());
         }
         bail!(
             "the window manager does not publish a window list (_NET_CLIENT_LIST); is it EWMH-compliant?"

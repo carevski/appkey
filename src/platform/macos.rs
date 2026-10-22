@@ -153,6 +153,11 @@ pub fn focus_pid(pid: u32) -> Result<bool> {
     ))
 }
 
+/// egui reports Cmd in its modifiers on macOS, so there's nothing to add.
+pub fn logo_key_down() -> bool {
+    false
+}
+
 pub fn hotkeys(sink: crate::hotkeys::Sink) -> Result<Box<dyn crate::hotkeys::Hotkeys>> {
     Ok(Box::new(crate::hotkeys::GlobalHotkeys::new(sink)?))
 }

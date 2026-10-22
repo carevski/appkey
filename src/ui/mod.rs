@@ -359,7 +359,11 @@ fn key_button(
         return None;
     }
     let pressed = ui.input_mut(|input| {
-        let found = keys::scan(&input.events, super_down);
+        let mut found = keys::scan(&input.events, super_down);
+        // Some desktops swallow the Super key's own press; ask the OS (only on a key press).
+        if found.is_some() && !super_down && platform::logo_key_down() {
+            found = keys::scan(&input.events, true);
+        }
         // Keep the press away from other widgets (Tab, Enter, Esc closing dialogs…).
         if found.is_some() {
             input.events.retain(|e| !matches!(e, egui::Event::Key { .. } | egui::Event::Text(_)));

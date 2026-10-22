@@ -139,8 +139,8 @@ impl HyprHotkeys {
     }
 }
 
-/// Single-quotes a string for `/bin/sh -c`, which Hyprland's `exec` uses.
-fn sh_quote(s: &str) -> String {
+/// Single-quotes a string for `/bin/sh -c` (Hyprland `exec`) or `g_shell_parse_argv` (Cinnamon).
+pub(super) fn sh_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 
