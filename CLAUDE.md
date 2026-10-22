@@ -16,6 +16,8 @@ Tiny cross-platform (macOS, Windows, Linux/X11) tray app: a global shortcut open
 
 ## Releases
 
+Sole developer, no review process: commit and push straight to `main` (no feature branches or PRs). Every push to `main` ships a release, so run `/verify` first.
+
 Every push to `main` runs `.github/workflows/release.yml`: CI → installers on native runners → GitHub Release `vMAJOR.MINOR.<run number>`. Packaging lives in `scripts/package-{linux,macos}.sh`, `scripts/package-windows.ps1` and `packaging/` (Inno Setup, Info.plist, .desktop, icon), plus `[package.metadata.deb]` / `[package.metadata.generate-rpm]` in Cargo.toml. Never commit a stamped version: `scripts/set-version.sh` is for CI only. `scripts/package-macos.sh` runs fully on this Mac. The Linux script runs in the `/verify` container (it builds for the container's own arch).
 
 ## Layout
