@@ -158,6 +158,12 @@ pub fn logo_key_down() -> bool {
     false
 }
 
+/// Window titles per pid; only the Linux memory window uses them.
+#[allow(dead_code)] // same API on every platform
+pub fn window_titles() -> std::collections::HashMap<u32, Vec<String>> {
+    std::collections::HashMap::new()
+}
+
 /// Registering reports system shortcuts as unavailable; nothing to list up front.
 pub fn desktop_shortcuts() -> Vec<(u32, String)> {
     Vec::new()

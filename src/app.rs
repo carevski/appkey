@@ -131,7 +131,7 @@ impl App {
         match event {
             Event::Hotkey(id) => {
                 if let Some(s) = self.active.get(&id) {
-                    match platform::focus_or_launch(&s.app, s.launch.as_deref()) {
+                    match crate::perform(&s.app, s.launch.as_deref()) {
                         Ok(Outcome::Focused) => log(&format!("{}: focused {}", s.keys, s.app)),
                         Ok(Outcome::Launched) => log(&format!("{}: launched {}", s.keys, s.app)),
                         Err(e) => self.set_status(&format!("{}: {e:#}", s.keys)),

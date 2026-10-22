@@ -39,7 +39,7 @@ impl MemoryTab {
         self.poll(ui.ctx());
         egui::ScrollArea::vertical().auto_shrink([false, true]).show(ui, |ui| {
             if warning_section(ui, watch, self.open_error.as_deref()) {
-                self.open_error = memory::open_window().err().map(|e| format!("{e:#}"));
+                self.open_error = memory::show_window().err().map(|e| format!("{e:#}"));
             }
             ui.add_space(10.0);
             ui.separator();
@@ -207,6 +207,39 @@ fn warning_section(ui: &mut egui::Ui, watch: &mut MemoryWatch, open_error: Optio
             ui.end_row();
         });
     });
+    ui.add_space(6.0);
+    let mut busy = watch.busy_background_minutes > 0;
+    if ui
+        .checkbox(
+            &mut busy,
+            "Also warn when a program left running in the background keeps the CPU busy",
+        )
+        .on_hover_text(
+            "For example a dev server or script whose terminal or Claude session has closed. \
+             Programs with a window don't count.",
+        )
+        .changed()
+    {
+        watch.busy_background_minutes = if busy { 10 } else { 0 };
+    }
+    if busy {
+        ui.horizontal(|ui| {
+            ui.add_space(24.0);
+            ui.label("for at least");
+            ui.add(
+                egui::Slider::new(&mut watch.busy_background_minutes, MemoryWatch::BUSY_RANGE)
+                    .suffix(" min"),
+            );
+        });
+    }
+    ui.add_space(6.0);
+    ui.label(
+        RichText::new(
+            "Tip: give the memory window its own shortcut. In Shortcuts, choose app → \
+             appkey → Memory window.",
+        )
+        .weak(),
+    );
     ui.add_space(4.0);
     ui.horizontal(|ui| {
         open = ui.button("Show memory use now…").clicked();

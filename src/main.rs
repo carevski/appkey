@@ -60,9 +60,10 @@ fn cli(args: &[String]) -> Result<()> {
         }
         ["open", app] => open(&path, app),
         ["settings"] => ui::run(path),
-        ["memory"] => memory_window(false),
-        // Opened by the daemon when memory runs low (see memory::Watcher).
-        ["memory", "--alert"] => memory_window(true),
+        ["memory"] => memory_window(None),
+        // Opened by the daemon when memory runs low / a background program is busy
+        // (see memory::Watcher).
+        ["memory", flag @ ("--alert" | "--busy")] => memory_window(Some(flag)),
         // Run by desktops that execute a command per shortcut (Hyprland binds).
         ["__hotkey", id] => run_hotkey(&path, id),
         // Test helper (undocumented): the id desktops know a shortcut by.
@@ -103,16 +104,35 @@ fn check(path: &Path) -> Result<()> {
 }
 
 #[cfg(target_os = "linux")]
-fn memory_window(alert: bool) -> Result<()> {
-    if ui::memory_window(alert)? {
+fn memory_window(flag: Option<&str>) -> Result<()> {
+    let mode = match flag {
+        Some("--alert") => ui::MemoryMode::LowMemory,
+        Some(_) => ui::MemoryMode::Busy,
+        None => ui::MemoryMode::Manual,
+    };
+    if ui::memory_window(mode)? {
         std::process::exit(memory::SNOOZE_EXIT);
     }
     Ok(())
 }
 
 #[cfg(not(target_os = "linux"))]
-fn memory_window(_alert: bool) -> Result<()> {
+fn memory_window(_flag: Option<&str>) -> Result<()> {
     bail!("`appkey memory` is only available on Ubuntu and Linux Mint")
+}
+
+/// What a shortcut does: open appkey's memory window, or focus / launch its app.
+pub(crate) fn perform(app: &str, launch: Option<&[String]>) -> Result<platform::Outcome> {
+    if app == config::MEMORY_ACTION {
+        #[cfg(target_os = "linux")]
+        {
+            memory::show_window()?;
+            return Ok(platform::Outcome::Focused);
+        }
+        #[cfg(not(target_os = "linux"))]
+        bail!("the memory window is only available on Ubuntu and Linux Mint");
+    }
+    platform::focus_or_launch(app, launch)
 }
 
 /// Does what the shortcut with this `HotKey` id is configured to do.
@@ -122,7 +142,7 @@ fn run_hotkey(path: &Path, id: &str) -> Result<()> {
     let Some(s) = cfg.shortcuts.iter().find(|s| s.hotkey.id() == id) else {
         bail!("no shortcut with id {id} in the config");
     };
-    platform::focus_or_launch(&s.app, s.launch.as_deref())?;
+    perform(&s.app, s.launch.as_deref())?;
     Ok(())
 }
 
@@ -132,7 +152,7 @@ fn open(path: &Path, app: &str) -> Result<()> {
         .ok()
         .and_then(|c| c.shortcuts.into_iter().find(|s| matcher::matches(app, &s.app)))
         .and_then(|s| s.launch);
-    let outcome = platform::focus_or_launch(app, launch.as_deref())?;
+    let outcome = perform(app, launch.as_deref())?;
     println!("{outcome:?} {app}");
     Ok(())
 }

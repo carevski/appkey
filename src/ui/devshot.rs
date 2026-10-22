@@ -13,19 +13,27 @@ pub struct DevShot {
     path: PathBuf,
     pub scene: String,
     frame: u32,
+    /// `APPKEY_SCREENSHOT_WAIT` seconds: let live data (CPU samples) settle first.
+    wait: std::time::Duration,
+    started: std::time::Instant,
 }
 
 impl DevShot {
     pub fn from_env() -> Option<Self> {
         let path = std::env::var_os("APPKEY_SCREENSHOT")?.into();
         let scene = std::env::var("APPKEY_SCREENSHOT_SCENE").unwrap_or_default();
-        Some(Self { path, scene, frame: 0 })
+        let wait = std::env::var("APPKEY_SCREENSHOT_WAIT")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .map_or(std::time::Duration::ZERO, std::time::Duration::from_secs_f64);
+        Some(Self { path, scene, frame: 0, wait, started: std::time::Instant::now() })
     }
 
     /// Call once per frame. Requests the shot after layout has settled, then saves and closes.
     pub fn tick(&mut self, ctx: &egui::Context) {
-        self.frame += 1;
-        if self.frame == 15 {
+        self.frame = self.frame.saturating_add(1);
+        if self.frame >= 15 && self.started.elapsed() >= self.wait && self.frame < u32::MAX {
+            self.frame = u32::MAX;
             ctx.send_viewport_cmd(ViewportCommand::Screenshot(UserData::default()));
         }
         ctx.request_repaint();

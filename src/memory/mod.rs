@@ -8,8 +8,10 @@
 //! and we never elevate. Parsers are platform-neutral and unit-tested on every
 //! host; reading `/proc` and signalling are Linux-only.
 
+pub mod procs;
 pub mod sysrq;
 
+use std::collections::{HashMap, VecDeque};
 use std::fmt::Write as _;
 use std::time::{Duration, Instant};
 
@@ -139,38 +141,6 @@ pub fn is_protected(name: &str) -> bool {
     PROTECTED.contains(&name) || PROTECTED_PREFIXES.iter().any(|p| name.starts_with(p))
 }
 
-/// All processes of one program, e.g. every `firefox` content process.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Group {
-    pub name: String,
-    pub pids: Vec<u32>,
-    /// Sum of resident memory. Shared pages are counted per process, so this
-    /// overstates a little, but the ranking is right.
-    pub rss_kib: u64,
-}
-
-/// The user's own closable programs, biggest first.
-pub fn group(procs: &[(u32, ProcStatus)], uid: u32, own_pid: u32, limit: usize) -> Vec<Group> {
-    let mut groups: Vec<Group> = Vec::new();
-    for (pid, p) in procs {
-        if p.uid != uid || *pid == own_pid || is_protected(&p.name) {
-            continue;
-        }
-        match groups.iter_mut().find(|g| g.name == p.name) {
-            Some(g) => {
-                g.pids.push(*pid);
-                g.rss_kib += p.rss_kib;
-            }
-            None => {
-                groups.push(Group { name: p.name.clone(), pids: vec![*pid], rss_kib: p.rss_kib });
-            }
-        }
-    }
-    groups.sort_by(|a, b| b.rss_kib.cmp(&a.rss_kib).then_with(|| a.name.cmp(&b.name)));
-    groups.truncate(limit);
-    groups
-}
-
 #[allow(clippy::cast_precision_loss)]
 pub fn format_kib(kib: u64) -> String {
     let mib = kib as f64 / 1024.0;
@@ -209,6 +179,50 @@ impl Debounce {
     }
 }
 
+/// Share of one core a background program must use, on average, to count as busy.
+const BUSY_SHARE: f64 = 0.9;
+
+/// CPU time samples per process, to spot background programs that keep a core busy.
+#[derive(Debug, Default)]
+pub struct BusyTracker {
+    /// `(pid, start_ticks)` → `(seconds since boot, cpu_ticks)`, oldest first.
+    samples: HashMap<(u32, u64), VecDeque<(f64, u64)>>,
+}
+
+impl BusyTracker {
+    /// Records `(pid, start_ticks, cpu_ticks)` of the current candidates at `now`
+    /// (seconds since boot) and returns the pids that used at least 90% of a core over
+    /// the whole last `window` seconds.
+    #[allow(clippy::cast_precision_loss)]
+    pub fn update(
+        &mut self,
+        now: f64,
+        procs: &[(u32, u64, u64)],
+        window: f64,
+        hz: u64,
+    ) -> Vec<u32> {
+        let live: std::collections::HashSet<(u32, u64)> =
+            procs.iter().map(|&(pid, start, _)| (pid, start)).collect();
+        self.samples.retain(|k, _| live.contains(k));
+        let mut busy = Vec::new();
+        for &(pid, start, ticks) in procs {
+            let s = self.samples.entry((pid, start)).or_default();
+            s.push_back((now, ticks));
+            // Keep one sample from before the window as the baseline.
+            while s.len() > 2 && s[1].0 <= now - window {
+                s.pop_front();
+            }
+            if let Some(&(t0, ticks0)) = s.front().filter(|(t0, _)| *t0 <= now - window) {
+                let used = ticks.saturating_sub(ticks0) as f64 / hz.max(1) as f64;
+                if used / (now - t0) >= BUSY_SHARE {
+                    busy.push(pid);
+                }
+            }
+        }
+        busy
+    }
+}
+
 #[cfg(target_os = "linux")]
 pub use linux::*;
 
@@ -220,7 +234,8 @@ mod linux {
 
     use anyhow::{Context, Result};
 
-    use super::{Debounce, ProcStatus, Snapshot, parse_meminfo, parse_pressure};
+    use super::procs::{self, Proc};
+    use super::{BusyTracker, Debounce, Snapshot, parse_meminfo, parse_pressure};
     use crate::config::MemoryWatch;
 
     /// Exit code of `appkey memory --alert` when the user chose "Snooze for an hour".
@@ -241,17 +256,52 @@ mod linux {
         Some(Snapshot { mem, pressure })
     }
 
-    pub fn read_processes() -> Vec<(u32, ProcStatus)> {
+    /// Every process (others' too, so the tree is complete). Details only for ours.
+    pub fn read_procs() -> Vec<Proc> {
+        let uid = current_uid();
         let Ok(dir) = fs::read_dir("/proc") else { return Vec::new() };
-        dir.filter_map(|e| {
-            let pid: u32 = e.ok()?.file_name().to_str()?.parse().ok()?;
-            Some((pid, read_status(pid)?))
-        })
-        .collect()
+        dir.filter_map(|e| read_proc(e.ok()?.file_name().to_str()?.parse().ok()?, uid)).collect()
     }
 
-    fn read_status(pid: u32) -> Option<ProcStatus> {
-        super::parse_status(&fs::read_to_string(format!("/proc/{pid}/status")).ok()?)
+    fn read_proc(pid: u32, uid: u32) -> Option<Proc> {
+        let dir = format!("/proc/{pid}");
+        let stat = procs::parse_stat(&fs::read_to_string(format!("{dir}/stat")).ok()?)?;
+        // Kernel threads have no memory of their own and are never anyone's app.
+        let status = super::parse_status(&fs::read_to_string(format!("{dir}/status")).ok()?)?;
+        let mut p = Proc {
+            pid,
+            ppid: stat.ppid,
+            uid: status.uid,
+            name: status.name,
+            rss_kib: status.rss_kib,
+            cpu_ticks: stat.cpu_ticks,
+            start_ticks: stat.start_ticks,
+            tty: stat.tty,
+            ..Proc::default()
+        };
+        if p.uid == uid {
+            p.cmdline =
+                procs::parse_cmdline(&fs::read(format!("{dir}/cmdline")).unwrap_or_default());
+            p.cwd =
+                fs::read_link(format!("{dir}/cwd")).ok().map(|c| c.to_string_lossy().into_owned());
+            p.service =
+                fs::read_to_string(format!("{dir}/cgroup")).is_ok_and(|c| procs::is_service(&c));
+        }
+        Some(p)
+    }
+
+    /// Clock ticks per second (for `cpu_ticks` and `start_ticks`).
+    pub fn clock_ticks() -> u64 {
+        // SAFETY: sysconf only reads a system constant.
+        u64::try_from(unsafe { libc::sysconf(libc::_SC_CLK_TCK) }).unwrap_or(100)
+    }
+
+    /// Seconds since boot.
+    pub fn uptime() -> f64 {
+        fs::read_to_string("/proc/uptime")
+            .ok()
+            .and_then(|t| t.split_whitespace().next()?.parse().ok())
+            .unwrap_or(0.0)
     }
 
     pub fn current_uid() -> u32 {
@@ -259,71 +309,164 @@ mod linux {
         unsafe { libc::getuid() }
     }
 
-    /// Sends `SIGTERM` (or `SIGKILL` when `force`) to each pid that still runs the
-    /// program `name` as us, so a pid reused since the list was read is left alone.
-    /// Returns how many were signalled.
-    pub fn signal(pids: &[u32], name: &str, force: bool) -> usize {
+    /// Sends `SIGTERM` (or `SIGKILL` when `force`) to each `(pid, start_ticks)` that is
+    /// still that same process and ours, so a pid reused since the list was read is left
+    /// alone. Returns how many were signalled.
+    pub fn signal(targets: &[(u32, u64)], force: bool) -> usize {
         let uid = current_uid();
         let sig = if force { libc::SIGKILL } else { libc::SIGTERM };
-        pids.iter()
-            .filter(|&&pid| read_status(pid).is_some_and(|p| p.name == name && p.uid == uid))
-            .filter_map(|&pid| libc::pid_t::try_from(pid).ok())
+        targets
+            .iter()
+            .filter(|&&(pid, start)| {
+                read_proc(pid, u32::MAX).is_some_and(|p| p.start_ticks == start && p.uid == uid)
+            })
+            .filter_map(|&(pid, _)| libc::pid_t::try_from(pid).ok())
             // SAFETY: kill only sends a signal; the kernel checks we may signal this pid.
             .filter(|&pid| unsafe { libc::kill(pid, sig) } == 0)
             .count()
     }
 
-    /// Daemon side: checks memory every tick and opens the warning dialog.
+    /// Which warning a dialog shows.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Warning {
+        LowMemory,
+        Busy,
+    }
+
+    /// Background CPU use is sampled every this many ticks (seconds).
+    const BUSY_SAMPLE_TICKS: u32 = 10;
+
+    /// Daemon side: checks memory every tick (and background CPU use every 10) and opens
+    /// the warning dialog.
     #[derive(Debug)]
     pub struct Watcher {
         supported: bool,
         debounce: Debounce,
-        dialog: Option<Child>,
+        busy_debounce: Debounce,
+        busy: BusyTracker,
+        ticks: u32,
+        dialog: Option<(Child, Warning)>,
     }
 
     impl Default for Watcher {
         fn default() -> Self {
-            Self { supported: available(), debounce: Debounce::default(), dialog: None }
+            Self {
+                supported: available(),
+                debounce: Debounce::default(),
+                busy_debounce: Debounce::default(),
+                busy: BusyTracker::default(),
+                ticks: 0,
+                dialog: None,
+            }
         }
     }
 
     impl Watcher {
         pub fn tick(&mut self, watch: MemoryWatch) -> Result<()> {
-            if !watch.enabled || !self.supported {
+            if !self.supported {
                 return Ok(());
             }
             let now = Instant::now();
-            if let Some(child) = &mut self.dialog {
-                match child.try_wait() {
+            if let Some((child, kind)) = &mut self.dialog {
+                let snoozed = match child.try_wait() {
                     Ok(None) => return Ok(()),
-                    Ok(Some(status)) => {
-                        self.debounce.closed(now, status.code() == Some(SNOOZE_EXIT));
-                    }
-                    Err(_) => self.debounce.closed(now, false),
+                    Ok(Some(status)) => status.code() == Some(SNOOZE_EXIT),
+                    Err(_) => false,
+                };
+                match kind {
+                    Warning::LowMemory => self.debounce.closed(now, snoozed),
+                    Warning::Busy => self.busy_debounce.closed(now, snoozed),
                 }
                 self.dialog = None;
             }
-            let stressed = read_snapshot().is_some_and(|s| s.is_stressed(watch));
-            if !self.debounce.update(stressed, now) {
-                return Ok(());
+            if watch.enabled {
+                let stressed = read_snapshot().is_some_and(|s| s.is_stressed(watch));
+                if self.debounce.update(stressed, now) {
+                    return self.open(Warning::LowMemory, now);
+                }
             }
+            self.ticks = self.ticks.wrapping_add(1);
+            if watch.busy_background_minutes > 0 && self.ticks.is_multiple_of(BUSY_SAMPLE_TICKS) {
+                let window = f64::from(watch.busy_background_minutes) * 60.0;
+                let busy = self.background_busy(window);
+                if self.busy_debounce.update(busy, now) {
+                    return self.open(Warning::Busy, now);
+                }
+            }
+            Ok(())
+        }
+
+        /// Whether a program left running in the background (no window, its starter
+        /// gone) has kept a core busy for the last `window` seconds.
+        fn background_busy(&mut self, window: f64) -> bool {
+            let list = read_procs();
+            let home =
+                dirs::home_dir().map(|h| h.to_string_lossy().into_owned()).unwrap_or_default();
+            // Windows are only looked up once something is busy (cheap on every desktop).
+            let no_windows = std::collections::HashMap::new();
+            let groups = procs::build_groups(
+                &list,
+                current_uid(),
+                std::process::id(),
+                super::is_protected,
+                &no_windows,
+                &home,
+            );
+            let candidates: Vec<(u32, u64, u64)> = groups
+                .iter()
+                .filter(|g| g.detached)
+                .flat_map(|g| &g.members)
+                .filter_map(|pid| list.iter().find(|p| p.pid == *pid))
+                .map(|p| (p.pid, p.start_ticks, p.cpu_ticks))
+                .collect();
+            let busy = self.busy.update(uptime(), &candidates, window, clock_ticks());
+            if busy.is_empty() {
+                return false;
+            }
+            let titles = crate::platform::window_titles();
+            groups.iter().any(|g| {
+                g.detached
+                    && g.members.iter().any(|p| busy.contains(p))
+                    && !g.members.iter().any(|p| titles.contains_key(p))
+            })
+        }
+
+        fn open(&mut self, kind: Warning, now: Instant) -> Result<()> {
+            let flag = if kind == Warning::Busy { "--busy" } else { "--alert" };
             let spawned = std::env::current_exe()
-                .and_then(|exe| Command::new(exe).args(["memory", "--alert"]).spawn());
+                .and_then(|exe| Command::new(exe).args(["memory", flag]).spawn());
             match spawned {
                 Ok(child) => {
-                    self.dialog = Some(child);
+                    self.dialog = Some((child, kind));
                     Ok(())
                 }
                 Err(e) => {
-                    self.debounce.closed(now, false);
-                    Err(e).context("memory is low, but the warning window could not be opened")
+                    match kind {
+                        Warning::LowMemory => self.debounce.closed(now, false),
+                        Warning::Busy => self.busy_debounce.closed(now, false),
+                    }
+                    Err(e).context("couldn't open appkey's memory window")
                 }
             }
         }
     }
 
-    /// Opens the memory window by hand (settings tab button).
-    pub fn open_window() -> Result<()> {
+    /// Brings an open memory window to the front, or opens one (shortcut, settings tab).
+    pub fn show_window() -> Result<()> {
+        let open = read_procs().into_iter().find(|p| {
+            p.pid != std::process::id()
+                && p.cmdline.get(1).is_some_and(|a| a == "memory")
+                && p.cmdline.first().is_some_and(|a| a.ends_with("appkey"))
+        });
+        if let Some(p) = open
+            && matches!(crate::platform::focus_pid(p.pid), Ok(true))
+        {
+            return Ok(());
+        }
+        open_window()
+    }
+
+    fn open_window() -> Result<()> {
         let exe = std::env::current_exe()?;
         crate::platform::spawn(&[exe.to_string_lossy().into_owned(), "memory".into()])
     }
@@ -364,8 +507,12 @@ mod tests {
 
     #[test]
     fn stress_uses_either_threshold() {
-        let watch =
-            MemoryWatch { enabled: true, min_available_percent: 10, max_pressure_percent: 20 };
+        let watch = MemoryWatch {
+            enabled: true,
+            min_available_percent: 10,
+            max_pressure_percent: 20,
+            ..MemoryWatch::default()
+        };
         let snap = |avail, pressure| Snapshot {
             mem: MemInfo { total_kib: 1000, available_kib: avail },
             pressure,
@@ -382,31 +529,32 @@ mod tests {
     }
 
     #[test]
-    fn groups_own_closable_processes() {
+    fn parses_status() {
         let p = |name: &str, uid, rss| ProcStatus { name: name.into(), uid, rss_kib: rss };
         let status =
             "Name:\tfirefox\nUmask:\t0002\nUid:\t1000\t1000\t1000\t1000\nVmRSS:\t  2048 kB\n";
         assert_eq!(parse_status(status), Some(p("firefox", 1000, 2048)));
         assert_eq!(parse_status("Name:\tkthreadd\nUid:\t0\t0\t0\t0\n"), None);
+        assert!(is_protected("cinnamon") && is_protected("gsd-power") && !is_protected("chrome"));
+    }
 
-        let procs = [
-            (10, p("firefox", 1000, 300)),
-            (11, p("firefox", 1000, 400)),
-            (12, p("code", 1000, 500)),
-            (13, p("Xorg", 1000, 9000)),
-            (14, p("csd-power", 1000, 9000)),
-            (15, p("postgres", 120, 9000)),
-            (16, p("appkey-like", 1000, 1)),
-            (99, p("me", 1000, 9000)),
-        ];
-        let groups = group(&procs, 1000, 99, 2);
-        assert_eq!(
-            groups,
-            vec![
-                Group { name: "firefox".into(), pids: vec![10, 11], rss_kib: 700 },
-                Group { name: "code".into(), pids: vec![12], rss_kib: 500 },
-            ]
-        );
+    #[test]
+    #[allow(clippy::cast_precision_loss)]
+    fn busy_needs_the_whole_window() {
+        let mut t = BusyTracker::default();
+        let hz = 100;
+        // One process at 100% of a core, one at 50%, sampled every 10 s.
+        let mut busy = Vec::new();
+        for i in 0..=36u64 {
+            let now = 1000.0 + 10.0 * i as f64;
+            busy = t.update(now, &[(1, 7, i * 1000), (2, 8, i * 500)], 300.0, hz);
+            if i < 30 {
+                assert!(busy.is_empty(), "not busy before 5 minutes passed (i = {i})");
+            }
+        }
+        assert_eq!(busy, vec![1]);
+        // A new process with the same pid (different start) starts from scratch.
+        assert!(t.update(1400.0, &[(1, 9, 999_999)], 300.0, hz).is_empty());
     }
 
     #[test]

@@ -34,6 +34,8 @@ struct Client {
     initial_class: String,
     #[serde(default)]
     pid: i64,
+    #[serde(default)]
+    title: String,
     #[serde(rename = "focusHistoryID", default)]
     focus_history_id: i64,
     #[serde(default = "yes")]
@@ -50,7 +52,8 @@ impl From<Client> for Win {
         if !c.initial_class.is_empty() && !ids.contains(&c.initial_class) {
             ids.push(c.initial_class);
         }
-        Win { handle: c.address, ids, pid: u32::try_from(c.pid).ok().filter(|&p| p > 0) }
+        let pid = u32::try_from(c.pid).ok().filter(|&p| p > 0);
+        Win { handle: c.address, ids, pid, title: c.title }
     }
 }
 

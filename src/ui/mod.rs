@@ -42,10 +42,13 @@ pub fn run(config_path: PathBuf) -> Result<()> {
     .map_err(|e| anyhow!("could not open the settings window: {e}"))
 }
 
-/// `appkey memory [--alert]`. Returns `true` if the user snoozed the warning.
 #[cfg(target_os = "linux")]
-pub fn memory_window(alert: bool) -> Result<bool> {
-    pressure::run(alert)
+pub use pressure::Mode as MemoryMode;
+
+/// `appkey memory [--alert | --busy]`. Returns `true` if the user snoozed the warning.
+#[cfg(target_os = "linux")]
+pub fn memory_window(mode: MemoryMode) -> Result<bool> {
+    pressure::run(mode)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

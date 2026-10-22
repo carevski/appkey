@@ -37,6 +37,8 @@ pub(crate) struct Win {
     /// Every name the window goes by (`WM_CLASS` parts, Wayland app id, desktop file id).
     pub ids: Vec<String>,
     pub pid: Option<u32>,
+    /// Window title (the memory window uses it to say which Chrome / IDE window is which).
+    pub title: String,
 }
 
 pub(crate) trait WindowSystem {
@@ -247,6 +249,20 @@ pub fn logo_key_down() -> bool {
     session() == Session::X11 && x11::logo_key_down()
 }
 
+/// Titles of each process's windows, for the memory window. Errors leave it empty:
+/// the window still works, it just can't name windows.
+pub fn window_titles() -> std::collections::HashMap<u32, Vec<String>> {
+    let mut out: std::collections::HashMap<u32, Vec<String>> = std::collections::HashMap::new();
+    for w in window_system().and_then(|ws| ws.windows()).unwrap_or_default() {
+        if let Some(pid) = w.pid
+            && !w.title.trim().is_empty()
+        {
+            out.entry(pid).or_default().push(w.title);
+        }
+    }
+    out
+}
+
 pub fn diagnostics() -> Vec<String> {
     let mut out = vec![format!("Linux session: {:?}, desktop: {}", session(), desktop())];
     match backend() {
@@ -292,7 +308,12 @@ mod tests {
     }
 
     fn win(ids: &[&str]) -> Win {
-        Win { handle: String::new(), ids: ids.iter().map(|s| (*s).to_owned()).collect(), pid: None }
+        Win {
+            handle: String::new(),
+            ids: ids.iter().map(|s| (*s).to_owned()).collect(),
+            pid: None,
+            title: String::new(),
+        }
     }
 
     #[test]

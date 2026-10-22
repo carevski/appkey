@@ -36,6 +36,8 @@ pub(super) struct X {
     client_list: Atom,
     active: Atom,
     wm_pid: Atom,
+    wm_name: Atom,
+    utf8: Atom,
 }
 
 impl X {
@@ -48,7 +50,9 @@ impl X {
         let client_list = atom(b"_NET_CLIENT_LIST")?;
         let active = atom(b"_NET_ACTIVE_WINDOW")?;
         let wm_pid = atom(b"_NET_WM_PID")?;
-        Ok(Self { conn, root, stacking, client_list, active, wm_pid })
+        let wm_name = atom(b"_NET_WM_NAME")?;
+        let utf8 = atom(b"UTF8_STRING")?;
+        Ok(Self { conn, root, stacking, client_list, active, wm_pid, wm_name, utf8 })
     }
 
     /// Managed windows, most recently used first (falls back to mapping order).
@@ -85,6 +89,23 @@ impl X {
             .reply()
             .ok()?;
         reply.value32()?.next()
+    }
+
+    /// `_NET_WM_NAME` (UTF-8), else the legacy `WM_NAME`.
+    fn title(&self, w: Window) -> String {
+        for (prop, ty) in
+            [(self.wm_name, self.utf8), (AtomEnum::WM_NAME.into(), AtomEnum::ANY.into())]
+        {
+            if let Ok(Ok(reply)) = self
+                .conn
+                .get_property(false, w, prop, ty, 0, 1024)
+                .map(x11rb::cookie::Cookie::reply)
+                && !reply.value.is_empty()
+            {
+                return String::from_utf8_lossy(&reply.value).into_owned();
+            }
+        }
+        String::new()
     }
 
     /// `WM_CLASS` is two NUL-terminated strings: instance, then class.
@@ -168,7 +189,7 @@ fn parse_wm_class(raw: &[u8]) -> Vec<String> {
 
 impl X {
     fn win(&self, w: Window) -> Win {
-        Win { handle: w.to_string(), ids: self.wm_class(w), pid: self.pid(w) }
+        Win { handle: w.to_string(), ids: self.wm_class(w), pid: self.pid(w), title: self.title(w) }
     }
 }
 

@@ -42,11 +42,14 @@ struct ShellWindow {
     id: String,
     ids: Vec<String>,
     pid: i64,
+    #[serde(default)]
+    title: String,
 }
 
 impl From<ShellWindow> for Win {
     fn from(w: ShellWindow) -> Self {
-        Win { handle: w.id, ids: w.ids, pid: u32::try_from(w.pid).ok().filter(|&p| p > 0) }
+        let pid = u32::try_from(w.pid).ok().filter(|&p| p > 0);
+        Win { handle: w.id, ids: w.ids, pid, title: w.title }
     }
 }
 

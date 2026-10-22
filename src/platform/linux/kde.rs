@@ -40,6 +40,8 @@ struct KWindow {
     name: String,
     desktop: String,
     pid: i64,
+    #[serde(default)]
+    caption: String,
 }
 
 impl From<KWindow> for Win {
@@ -50,7 +52,8 @@ impl From<KWindow> for Win {
                 ids.push(id);
             }
         }
-        Win { handle: w.id, ids, pid: u32::try_from(w.pid).ok().filter(|&p| p > 0) }
+        let pid = u32::try_from(w.pid).ok().filter(|&p| p > 0);
+        Win { handle: w.id, ids, pid, title: w.caption }
     }
 }
 
@@ -59,7 +62,8 @@ const PRELUDE: &str = r"
 const stack = workspace.stackingOrder || (workspace.windowList ? workspace.windowList() : workspace.clientList());
 const apps = stack.filter(w => w.normalWindow && !w.skipTaskbar && !w.deleted);
 const info = w => ({ id: String(w.internalId), class: String(w.resourceClass || ''), name: String(w.resourceName || ''),
-                     desktop: String(w.desktopFileName || ''), pid: w.pid || 0 });
+                     desktop: String(w.desktopFileName || ''), pid: w.pid || 0,
+                     caption: String(w.caption || '') });
 const active = () => workspace.activeWindow !== undefined ? workspace.activeWindow : workspace.activeClient;
 ";
 

@@ -12,7 +12,7 @@ Tiny cross-platform (macOS, Windows, Linux/X11) tray app: a global shortcut open
 - Size check: `cargo build --release && ls -lh target/release/appkey`
 - Linux end-to-end on Xvfb + Openbox, both in CI and in `/verify`: `scripts/test-x11.sh <binary>` (focus behaviour), `scripts/test-settings-ui.sh <binary>` (record shortcut → save → daemon reload → shortcut works)
 - Wayland e2e (containers; see `/verify` and docs/DESIGN.md "Testing Wayland"): `scripts/wayland/test-{gnome,kde,hyprland}.sh`
-- See the settings window without screen-recording permission (debug builds): `APPKEY_SCREENSHOT=/tmp/s.png cargo run -- settings`, add `APPKEY_SCREENSHOT_SCENE=picker` for the app picker, `=memory` for the Memory tab (Linux). `APPKEY_SCREENSHOT=/tmp/m.png cargo run -- memory` for the warning window. Then Read the PNG. Do this after any UI change.
+- See the settings window without screen-recording permission (debug builds): `APPKEY_SCREENSHOT=/tmp/s.png cargo run -- settings`, add `APPKEY_SCREENSHOT_SCENE=picker` for the app picker, `=memory` for the Memory tab (Linux). `APPKEY_SCREENSHOT=/tmp/m.png cargo run -- memory` for the memory window (add `APPKEY_SCREENSHOT_WAIT=4` so CPU % is sampled first). Then Read the PNG. Do this after any UI change.
 
 ## Releases
 
@@ -29,7 +29,7 @@ Every push to `main` runs `.github/workflows/release.yml`: CI → installers on 
 - `src/matcher.rs`: how a configured `app` name is compared to what the OS reports
 - `src/platform/{macos,windows}.rs`, `src/platform/linux/`: one backend per OS, **same public functions in each** (listed in `platform/mod.rs`). `desktop_entry.rs` / `lnk.rs` are pure parsers compiled for tests on every host.
 - `src/platform/linux/`: `mod.rs` picks a backend per session/desktop. `x11.rs`, `gnome.rs` (+ `packaging/gnome-extension/`), `kde.rs`, `hyprland.rs` implement `WindowSystem`. `cinnamon.rs` = Super shortcuts as Cinnamon custom keybindings (X11 windows otherwise). `reserved.rs` = combos Cinnamon/GNOME use themselves (read from GSettings; flagged in settings, reported unavailable by the daemon). `portal.rs` = GlobalShortcuts portal, `xkb.rs` = key syntax conversions. See the table in docs/DESIGN.md.
-- `src/memory/`: Ubuntu/Mint only: low-memory detection (`/proc/meminfo`, PSI), grouping and signalling the user's processes, Magic SysRq (`sysrq.rs`). Parsers compile on every host for tests. UI: `ui/memory.rs` (settings tab), `ui/pressure.rs` (`appkey memory [--alert]` window)
+- `src/memory/`: Ubuntu/Mint only: low-memory detection (`/proc/meminfo`, PSI), busy-background-CPU tracking, signalling the user's processes, Magic SysRq (`sysrq.rs`). `procs.rs` = process tree → apps, labels (Chrome tabs, IntelliJ, Claude Code…), "left running" detection. Parsers compile on every host for tests. UI: `ui/memory.rs` (settings tab), `ui/pressure.rs` (`appkey memory [--alert]` window)
 - `src/hotkeys.rs`: `Hotkeys` trait; global-hotkey on macOS/Windows/X11, desktop-specific ones on Wayland
 
 ## Rules

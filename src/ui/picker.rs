@@ -14,6 +14,8 @@ pub struct Picker {
     search: String,
     running: Result<Vec<AppInfo>, String>,
     installed: Vec<AppInfo>,
+    /// appkey's own actions (the memory window), where available.
+    builtin: Vec<AppInfo>,
     capture_until: Option<Instant>,
     message: Option<String>,
     manual_app: String,
@@ -40,6 +42,7 @@ impl Picker {
                 })
                 .map_err(|e| format!("{e:#}")),
             installed: platform::installed_apps(),
+            builtin: builtin_actions(),
             capture_until: None,
             message: None,
             manual_app: current.map(|a| a.app.clone()).unwrap_or_default(),
@@ -78,6 +81,11 @@ impl Picker {
                     || a.app.to_lowercase().contains(&needle)
             };
             ScrollArea::vertical().max_height(280.0).auto_shrink([false, true]).show(ui, |ui| {
+                if self.builtin.iter().any(&hit) {
+                    ui.label(RichText::new("appkey").strong());
+                    list(ui, self.builtin.iter().filter(|a| hit(a)), &mut outcome);
+                    ui.add_space(6.0);
+                }
                 ui.label(RichText::new("Open now").strong());
                 match &self.running {
                     Ok(apps) => list(ui, apps.iter().filter(|a| hit(a)), &mut outcome),
@@ -174,18 +182,41 @@ impl Picker {
     }
 }
 
+fn shorten(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_owned()
+    } else {
+        format!("{}…", s.chars().take(max - 1).collect::<String>())
+    }
+}
+
+fn builtin_actions() -> Vec<AppInfo> {
+    #[cfg(target_os = "linux")]
+    if crate::memory::available() {
+        return vec![AppInfo {
+            name: "Memory window".into(),
+            app: crate::config::MEMORY_ACTION.into(),
+            launch: None,
+        }];
+    }
+    Vec::new()
+}
+
 fn list<'a>(ui: &mut egui::Ui, apps: impl Iterator<Item = &'a AppInfo>, outcome: &mut Outcome) {
     let mut any = false;
     for a in apps {
         any = true;
-        let text = format!("{}   ", a.name);
+        // Some names are long (Chromium with a custom profile puts its path in WM_CLASS):
+        // cut them so the dialog keeps its size.
+        let text = format!("{}   ", shorten(&a.name, 44));
         let r = ui
             .horizontal(|ui| {
                 let r = ui.selectable_label(false, text);
-                ui.label(RichText::new(&a.app).weak().small());
+                ui.label(RichText::new(shorten(&a.app, 36)).weak().small());
                 r
             })
-            .inner;
+            .inner
+            .on_hover_text(format!("{}\n{}", a.name, a.app));
         if r.clicked() {
             *outcome = Outcome::Chosen(a.clone());
         }

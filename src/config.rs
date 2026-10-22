@@ -31,17 +31,26 @@ pub struct MemoryWatch {
     /// Also warn when tasks stall on memory this share of the time (PSI "some", 10 s
     /// average). 0 turns this check off.
     pub max_pressure_percent: u8,
+    /// Warn when a program left running in the background keeps a CPU core busy for this
+    /// many minutes. 0 turns this check off.
+    pub busy_background_minutes: u8,
 }
 
 impl Default for MemoryWatch {
     fn default() -> Self {
-        Self { enabled: false, min_available_percent: 10, max_pressure_percent: 20 }
+        Self {
+            enabled: false,
+            min_available_percent: 10,
+            max_pressure_percent: 20,
+            busy_background_minutes: 0,
+        }
     }
 }
 
 impl MemoryWatch {
     pub const AVAILABLE_RANGE: std::ops::RangeInclusive<u8> = 2..=50;
     pub const PRESSURE_RANGE: std::ops::RangeInclusive<u8> = 0..=90;
+    pub const BUSY_RANGE: std::ops::RangeInclusive<u8> = 1..=60;
 
     pub fn validate(self) -> Result<()> {
         if !Self::AVAILABLE_RANGE.contains(&self.min_available_percent) {
@@ -58,9 +67,18 @@ impl MemoryWatch {
                 Self::PRESSURE_RANGE.end()
             );
         }
+        if self.busy_background_minutes > *Self::BUSY_RANGE.end() {
+            bail!(
+                "memory_watch: busy_background_minutes must be at most {} (0 = off)",
+                Self::BUSY_RANGE.end()
+            );
+        }
         Ok(())
     }
 }
+
+/// The `app` of a shortcut that opens appkey's memory window (Ubuntu / Linux Mint).
+pub const MEMORY_ACTION: &str = "appkey:memory";
 
 /// One `[[shortcut]]` exactly as written in the file (unvalidated). The settings
 /// window edits these and writes them back.
@@ -317,10 +335,23 @@ mod tests {
         let cfg = parse("[memory_watch]\nenabled = true\nmin_available_percent = 5").unwrap();
         assert_eq!(
             cfg.memory_watch,
-            MemoryWatch { enabled: true, min_available_percent: 5, max_pressure_percent: 20 }
+            MemoryWatch {
+                enabled: true,
+                min_available_percent: 5,
+                max_pressure_percent: 20,
+                busy_background_minutes: 0
+            }
         );
         assert!(parse("[memory_watch]\nmin_available_percent = 0").is_err());
         assert!(parse("[memory_watch]\nmax_pressure_percent = 100").is_err());
+        assert!(parse("[memory_watch]\nbusy_background_minutes = 61").is_err());
+        assert_eq!(
+            parse("[memory_watch]\nbusy_background_minutes = 5")
+                .unwrap()
+                .memory_watch
+                .busy_background_minutes,
+            5
+        );
         assert!(parse("[memory_watch]\nfoo = 1").is_err());
     }
 

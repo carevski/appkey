@@ -134,7 +134,20 @@ Combinations with two modifiers are the safest: <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+*
 
 On Ubuntu, Linux Mint and other Ubuntu-based systems, the settings window has a **Memory** tab with two tools.
 
-**Low-memory warning.** Tick *Warn me before the computer runs out of memory* and click **Save**. When free memory stays below the limit you set (10% by default), or programs keep waiting on memory (20% of the time by default), appkey opens a window listing your biggest programs. Tick the ones you don't need and click **Close selected**: they're asked to quit, like closing their windows, so they can save first. If one doesn't react within 5 seconds, a **Force quit** button appears. **Snooze for an hour** keeps the warning away for an hour; **Dismiss** for 5 minutes. You can open the same window any time with **Show memory use now…** or `appkey memory`. appkey only offers your own programs, never parts of the desktop itself.
+**The memory window** shows what's running, grouped by app, so you can tell quickly what is what and close it:
+
+- **One row per app, with everything it started** underneath (rows open expanded; click ▾ to fold one): Chrome with its tabs, GPU and network processes; IntelliJ IDEA (or PyCharm, WebStorm…) with its Kotlin daemon; a terminal tab with what runs in it, e.g. *Terminal: Claude Code* with its dev server.
+- **Names you recognise**: apps are labelled with their window titles (Chrome's open pages, IntelliJ's projects), programs without a window with the folder they run in. Hover a row for the full command, folder and process id.
+- **Memory, CPU and how long it has been running**, sortable by memory or CPU.
+- **Left running in the background**, listed first: programs with no window whose terminal, Claude session or IDE has already closed (old dev servers, Gradle daemons, scripts stuck in a loop). **Close all of these** clears them in one go.
+- **Show** brings an app's window to the front, so you can check before closing. **Close** asks a whole app to quit; **End** stops one process (for a Chrome tab: that tab shows "Aw, Snap!" and can be reloaded; which tab is which is only visible in Chrome's own Task Manager, <kbd>Shift</kbd>+<kbd>Esc</kbd>). If something doesn't quit within 5 seconds, **Force quit** appears.
+- The list holds still while the mouse pointer is in the window, so a click always hits what you aimed at.
+
+Open it with **Show memory use now…**, `appkey memory`, or **its own shortcut**: in Shortcuts, add one and choose app → *appkey* → **Memory window**. appkey only offers your own programs, never parts of the desktop itself.
+
+**Low-memory warning.** Tick *Warn me before the computer runs out of memory* and click **Save**. When free memory stays below the limit you set (10% by default), or programs keep waiting on memory (20% of the time by default), the memory window opens by itself. **Snooze for an hour** keeps the warning away for an hour; **Dismiss** for 5 minutes.
+
+**Busy background programs.** Tick *Also warn when a program left running in the background keeps the CPU busy* and pick how long (10 minutes by default). If such a program uses a whole CPU core for that long, the memory window opens with it at the top.
 
 **Emergency keys (Magic SysRq).** If the computer freezes before you can react, these keys still work because the Linux kernel handles them, not the desktop. Hold <kbd>Alt</kbd> and <kbd>PrtSc</kbd> (SysRq), then press:
 
@@ -153,6 +166,7 @@ In the config file, the warning looks like this:
 enabled = true
 min_available_percent = 10   # warn below this much free memory (2–50)
 max_pressure_percent = 20    # …or when programs wait on memory this often (0 = never)
+busy_background_minutes = 10 # warn about busy background programs after this long (0 = off)
 ```
 
 ---
@@ -168,7 +182,7 @@ appkey also has a few terminal commands. They're optional, but useful for setup 
 | `appkey list` | Show open apps and the names to use for `app` |
 | `appkey check` | Check your config for mistakes and show notes for your system |
 | `appkey open firefox` | Do exactly what a shortcut for `firefox` would do, once |
-| `appkey memory` | Show the programs using the most memory, and close them (Ubuntu, Mint) |
+| `appkey memory` | Show what's running, grouped by app, and close it (Ubuntu, Mint) |
 | `appkey config` | Show where the config file is |
 
 On Windows, tick **Add appkey to PATH** in the installer to use these from a terminal.
