@@ -70,6 +70,43 @@ fn keysym(key: &str) -> Option<String> {
     Some(named.to_owned())
 }
 
+/// GTK accelerator (as GNOME / Cinnamon store them, `<Control><Alt>Right`) → config
+/// `keys` (`ctrl+alt+right`). `None` for keys a shortcut can't use (media keys, `Super_L`).
+pub fn from_gtk(accel: &str) -> Option<String> {
+    let mut mods = Vec::new();
+    let mut rest = accel.trim();
+    while let Some(after) = rest.strip_prefix('<') {
+        let (m, tail) = after.split_once('>')?;
+        mods.push(match m.to_lowercase().as_str() {
+            "control" | "ctrl" | "primary" => "ctrl",
+            "alt" | "mod1" => "alt",
+            "shift" => "shift",
+            "super" | "mod4" => "super",
+            _ => return None,
+        });
+        rest = tail;
+    }
+    let key = match rest {
+        k if k.len() == 1 && k.chars().all(|c| c.is_ascii_alphanumeric()) => k.to_lowercase(),
+        k if k.len() > 1 && k.starts_with(['F', 'f']) && k[1..].parse::<u8>().is_ok() => {
+            k.to_lowercase()
+        }
+        "Left" | "Right" | "Up" | "Down" | "Home" | "End" | "Delete" | "Insert" | "Tab"
+        | "Escape" | "space" | "minus" | "equal" | "comma" | "period" | "slash" | "backslash"
+        | "semicolon" | "bracketleft" | "bracketright" => rest.to_lowercase(),
+        "Return" | "KP_Enter" => "enter".into(),
+        "BackSpace" => "backspace".into(),
+        "Page_Up" | "Prior" => "pageup".into(),
+        "Page_Down" | "Next" => "pagedown".into(),
+        "Print" => "printscreen".into(),
+        "apostrophe" => "quote".into(),
+        "grave" => "backquote".into(),
+        _ => return None,
+    };
+    mods.dedup();
+    Some(mods.into_iter().map(str::to_owned).chain([key]).collect::<Vec<_>>().join("+"))
+}
+
 impl Combo {
     /// XDG shortcuts spec, used by the GlobalShortcuts portal: `CTRL+ALT+t`.
     pub fn portal(&self) -> String {
@@ -134,6 +171,23 @@ mod tests {
         assert_eq!(parse("alt+KeyQ").unwrap().keysym, "q");
         assert_eq!(parse("ctrl+backquote").unwrap().keysym, "grave");
         assert_eq!(parse("cmd+1").unwrap().keysym, "1");
+    }
+
+    #[test]
+    fn reads_gtk_accelerators() {
+        assert_eq!(from_gtk("<Control><Alt>Right").as_deref(), Some("ctrl+alt+right"));
+        assert_eq!(from_gtk("<Super>d").as_deref(), Some("super+d"));
+        assert_eq!(from_gtk("<Primary><Shift>Page_Up").as_deref(), Some("ctrl+shift+pageup"));
+        assert_eq!(from_gtk("<Shift><Super>Tab").as_deref(), Some("shift+super+tab"));
+        assert_eq!(from_gtk("<Alt>F4").as_deref(), Some("alt+f4"));
+        assert_eq!(from_gtk("Print").as_deref(), Some("printscreen"));
+        for unusable in ["XF86AudioMute", "Super_L", "<Hyper>a", "<Alt>Above_Tab", "", "<Super"] {
+            assert_eq!(from_gtk(unusable), None, "{unusable}");
+        }
+        // Round trip with what we write for GNOME/Cinnamon.
+        for keys in ["ctrl+alt+t", "super+i", "shift+super+f5"] {
+            assert_eq!(from_gtk(&parse(keys).unwrap().gtk()).as_deref(), Some(keys));
+        }
     }
 
     #[test]

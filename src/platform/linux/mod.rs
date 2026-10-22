@@ -210,6 +210,12 @@ pub fn focus_pid(pid: u32) -> Result<bool> {
     }
 }
 
+/// Shortcuts the desktop itself uses, as `(HotKey id, "Cinnamon: Show desktop")`, so the settings window can
+/// warn before one is picked. Only Cinnamon so far.
+pub fn desktop_shortcuts() -> Vec<(u32, String)> {
+    if is_cinnamon() { cinnamon::reserved() } else { Vec::new() }
+}
+
 /// Super held right now, for the shortcut recorder when the desktop swallowed the key's
 /// own press. Only X11 can tell; Wayland doesn't expose other keys' state.
 pub fn logo_key_down() -> bool {

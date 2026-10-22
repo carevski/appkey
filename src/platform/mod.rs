@@ -6,6 +6,7 @@
 //! - `installed_apps() -> Vec<AppInfo>`: apps the user could launch (for the picker)
 //! - `frontmost_app() -> Result<Option<AppInfo>>`: the focused app, if it isn't us
 //! - `focus_pid(pid) -> Result<bool>`: bring a process's window forward (our settings window)
+//! - `desktop_shortcuts() -> Vec<(u32, String)>`: combos the desktop itself uses (`HotKey` id, why)
 //! - `logo_key_down() -> bool`: Super/Win held, where the desktop hides its key events (X11)
 //! - `diagnostics() -> Vec<String>`: environment/permission notes for `appkey check`
 //! - `hotkeys(sink) -> Result<Box<dyn Hotkeys>>`: the shortcut mechanism for this desktop

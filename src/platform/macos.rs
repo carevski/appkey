@@ -158,6 +158,11 @@ pub fn logo_key_down() -> bool {
     false
 }
 
+/// Registering reports system shortcuts as unavailable; nothing to list up front.
+pub fn desktop_shortcuts() -> Vec<(u32, String)> {
+    Vec::new()
+}
+
 pub fn hotkeys(sink: crate::hotkeys::Sink) -> Result<Box<dyn crate::hotkeys::Hotkeys>> {
     Ok(Box::new(crate::hotkeys::GlobalHotkeys::new(sink)?))
 }

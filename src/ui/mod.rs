@@ -111,6 +111,8 @@ struct Settings {
     /// Set when the file couldn't be read; saving is disabled so we never clobber it.
     load_error: Option<String>,
     recording: Option<usize>,
+    /// Combos the desktop uses (`HotKey` id, why), to warn while editing.
+    desktop_shortcuts: Vec<(u32, String)>,
     /// Super / Win key held (egui reports it only on macOS); see [`keys::super_after`].
     super_down: bool,
     picker: Option<(usize, Picker)>,
@@ -147,6 +149,7 @@ impl Settings {
             load_error,
             recording: None,
             super_down: false,
+            desktop_shortcuts: platform::desktop_shortcuts(),
             picker: None,
             status: None,
             confirm_close: false,
@@ -180,6 +183,12 @@ impl Settings {
             .collect()
     }
 
+    /// Why the desktop would keep this combo for itself, if it would.
+    fn desktop_conflict(&self, id: Option<u32>) -> Option<String> {
+        let id = id?;
+        self.desktop_shortcuts.iter().find(|(d, _)| *d == id).map(|(_, why)| why.clone())
+    }
+
     fn save(&mut self) -> bool {
         let mut shortcuts: Vec<Entry> = self.rows.iter().map(Row::to_entry).collect();
         let keep_watch = self.had_memory_watch || self.memory_watch != MemoryWatch::default();
@@ -210,6 +219,14 @@ impl Settings {
         ui.label("Press a shortcut anywhere to bring its app to the front, or open it if it isn't running.");
         ui.add_space(8.0);
         let problems = self.problems();
+        // Not blocking: the desktop could free the combo, and the tray reports it anyway.
+        let warnings: Vec<Option<String>> = self
+            .rows
+            .iter()
+            .map(|r| {
+                self.desktop_conflict(keys::hotkey_id(&r.keys)).map(|w| format!("Used by {w}"))
+            })
+            .collect();
         let mut remove = None;
         egui::ScrollArea::vertical().auto_shrink([false, true]).show(ui, |ui| {
             egui::Grid::new("shortcuts").num_columns(4).spacing([10.0, 8.0]).striped(true).show(
@@ -243,8 +260,13 @@ impl Settings {
                         if ui.button("Remove").clicked() {
                             remove = Some(i);
                         }
-                        match &problems[i] {
-                            Some(p) => ui.label(RichText::new(p).color(ui.visuals().warn_fg_color)),
+                        match problems[i].as_ref().or(warnings[i].as_ref()) {
+                            Some(p) => ui.add(
+                                egui::Label::new(
+                                    RichText::new(p).color(ui.visuals().warn_fg_color),
+                                )
+                                .wrap(),
+                            ),
                             None => ui.label(""),
                         };
                         ui.end_row();

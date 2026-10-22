@@ -10,6 +10,7 @@
 //! (which also clears leftovers from a crash) and removed on exit.
 
 use std::process::Command;
+use std::str::FromStr as _;
 
 use anyhow::{Context, Result, bail};
 
@@ -49,15 +50,63 @@ fn strv(items: &[String]) -> String {
     format!("[{}]", quoted.join(", "))
 }
 
-/// Where Cinnamon already uses `accel` (e.g. `<Super>d` → "show-desktop"), from
-/// `gsettings list-recursively` output. Our own entries don't count.
-fn taken_by(listing: &str, accel: &str) -> Option<String> {
-    let needle = format!("'{}'", accel.to_lowercase());
-    listing
-        .lines()
-        .filter(|l| l.starts_with("org.cinnamon.desktop.keybindings") && !l.contains("appkey"))
-        .find(|l| l.to_lowercase().contains(&needle))
-        .and_then(|l| l.split_whitespace().nth(1).map(str::to_owned))
+/// `show-desktop` → `Show desktop`.
+fn pretty(key: &str) -> String {
+    let mut words = key.replace(['-', '_'], " ");
+    if let Some(first) = words.get_mut(..1) {
+        first.make_ascii_uppercase();
+    }
+    words
+}
+
+/// `(config keys, what for)` for Cinnamon's built-in shortcuts, from
+/// `gsettings list-recursively` output.
+fn builtin(listing: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for line in listing.lines().filter(|l| l.starts_with(SCHEMA)) {
+        let mut parts = line.splitn(3, ' ');
+        let (Some(_), Some(key), Some(value)) = (parts.next(), parts.next(), parts.next()) else {
+            continue;
+        };
+        if key == "custom-list" || !value.trim_start().starts_with(['[', '@']) {
+            continue;
+        }
+        for accel in parse_gvariant_strv(value) {
+            if let Some(keys) = xkb::from_gtk(&accel) {
+                out.push((keys, pretty(key)));
+            }
+        }
+    }
+    out
+}
+
+/// Every shortcut Cinnamon uses (built-in, and the user's own custom ones but not ours),
+/// as `(HotKey id, "Cinnamon: Show desktop")`.
+pub(super) fn reserved() -> Vec<(u32, String)> {
+    let mut found = builtin(&gsettings(&["list-recursively", SCHEMA]).unwrap_or_default());
+    for sub in ["wm", "media-keys"] {
+        let schema = format!("{SCHEMA}.{sub}");
+        found.extend(builtin(&gsettings(&["list-recursively", &schema]).unwrap_or_default()));
+    }
+    let customs = gsettings(&["get", SCHEMA, "custom-list"]).unwrap_or_default();
+    for id in parse_gvariant_strv(&customs).iter().filter(|id| !id.starts_with(PREFIX)) {
+        let schema = format!("{ENTRY_SCHEMA}:{}", entry_path(id));
+        let name = gsettings(&["get", &schema, "name"]).unwrap_or_default();
+        let name = name.trim_matches(['\'', '"']);
+        let binding = gsettings(&["get", &schema, "binding"]).unwrap_or_default();
+        for accel in parse_gvariant_strv(&binding) {
+            if let Some(keys) = xkb::from_gtk(&accel) {
+                found.push((keys, format!("your shortcut \"{name}\"")));
+            }
+        }
+    }
+    found
+        .into_iter()
+        .filter_map(|(keys, what)| {
+            let id = global_hotkey::hotkey::HotKey::from_str(&keys).ok()?.id();
+            Some((id, format!("Cinnamon: {what}")))
+        })
+        .collect()
 }
 
 /// `XGrabKey` for most shortcuts, Cinnamon keybindings for the ones with Super.
@@ -110,24 +159,25 @@ impl CinnamonHotkeys {
 
 impl Hotkeys for CinnamonHotkeys {
     fn set(&mut self, shortcuts: &[Shortcut]) -> Vec<String> {
-        let (with_super, plain): (Vec<&Shortcut>, Vec<&Shortcut>) =
-            shortcuts.iter().partition(|s| xkb::parse(&s.keys).is_some_and(|c| c.logo));
-        let plain: Vec<Shortcut> = plain.into_iter().cloned().collect();
-        let mut failed = self.grabs.set(&plain);
-
-        let listing = if with_super.is_empty() {
-            String::new()
-        } else {
-            gsettings(&["list-recursively"]).unwrap_or_default()
-        };
-        let mut binds = Vec::new();
-        for s in with_super {
-            let Some(accel) = xkb::parse(&s.keys).map(|c| c.gtk()) else { continue };
-            match taken_by(&listing, &accel) {
-                Some(by) => failed.push(format!("{} (Cinnamon already uses it for {by})", s.keys)),
-                None => binds.push((accel, s.hotkey.id(), s.keys.clone())),
+        // Cinnamon grabs its own shortcuts first, so ours would never fire.
+        let reserved = reserved();
+        let mut failed = Vec::new();
+        let mut usable = Vec::new();
+        for s in shortcuts {
+            match reserved.iter().find(|(id, _)| *id == s.hotkey.id()) {
+                Some((_, why)) => failed.push(format!("{} (used by {why})", s.keys)),
+                None => usable.push(s),
             }
         }
+        let (with_super, plain): (Vec<&Shortcut>, Vec<&Shortcut>) =
+            usable.into_iter().partition(|s| xkb::parse(&s.keys).is_some_and(|c| c.logo));
+        let plain: Vec<Shortcut> = plain.into_iter().cloned().collect();
+        failed.extend(self.grabs.set(&plain));
+
+        let binds: Vec<(String, u32, String)> = with_super
+            .into_iter()
+            .filter_map(|s| Some((xkb::parse(&s.keys)?.gtk(), s.hotkey.id(), s.keys.clone())))
+            .collect();
         if let Err(e) = self.apply(&binds) {
             failed.extend(binds.iter().map(|(_, _, keys)| format!("{keys} ({e:#})")));
         }
@@ -151,13 +201,23 @@ mod tests {
     fn finds_cinnamon_bindings() {
         let listing = "\
 org.cinnamon.desktop.keybindings.wm show-desktop ['<Super>d']
+org.cinnamon.desktop.keybindings.wm switch-to-workspace-right ['<Control><Alt>Right', '<Super>Page_Down']
+org.cinnamon.desktop.keybindings.wm toggle-recording @as []
+org.cinnamon.desktop.keybindings.media-keys volume-mute ['XF86AudioMute']
+org.cinnamon.desktop.keybindings custom-list ['custom0']
 org.cinnamon.desktop.keybindings looking-glass-keybinding ['<Super>l']
 org.gnome.desktop.wm.keybindings minimize ['<Super>h']
 ";
-        assert_eq!(taken_by(listing, "<Super>d").as_deref(), Some("show-desktop"));
-        assert_eq!(taken_by(listing, "<Super>D").as_deref(), Some("show-desktop"));
-        assert_eq!(taken_by(listing, "<Super>i"), None);
-        assert_eq!(taken_by(listing, "<Super>h"), None, "only Cinnamon's own schemas count");
+        let found = builtin(listing);
+        assert_eq!(
+            found,
+            [
+                ("super+d".into(), "Show desktop".into()),
+                ("ctrl+alt+right".into(), "Switch to workspace right".into()),
+                ("super+pagedown".into(), "Switch to workspace right".into()),
+                ("super+l".into(), "Looking glass keybinding".into()),
+            ]
+        );
         assert_eq!(strv(&["a".into(), "appkey0".into()]), r#"["a", "appkey0"]"#);
         assert_eq!(gstr(r#"'/o"x\appkey' __hotkey 1"#), r#""'/o\"x\\appkey' __hotkey 1""#);
     }
