@@ -15,6 +15,7 @@ mod gnome;
 mod hyprland;
 mod kde;
 mod portal;
+mod reserved;
 mod x11;
 mod xkb;
 
@@ -104,10 +105,24 @@ fn backend() -> Result<Backend> {
     }
 }
 
+/// `XDG_CURRENT_DESKTOP` is a `:`-separated list (`ubuntu:GNOME`, `X-Cinnamon`).
+fn desktop_is(names: &[&str]) -> bool {
+    desktop().split(':').any(|d| names.iter().any(|n| d.eq_ignore_ascii_case(n)))
+}
+
 fn is_cinnamon() -> bool {
-    desktop()
-        .split(':')
-        .any(|d| d.eq_ignore_ascii_case("X-Cinnamon") || d.eq_ignore_ascii_case("Cinnamon"))
+    desktop_is(&["X-Cinnamon", "Cinnamon"])
+}
+
+/// Where the desktop's own shortcuts can be read, if we know how.
+fn reserved_lookup() -> Option<reserved::Lookup> {
+    if is_cinnamon() {
+        Some(cinnamon::reserved)
+    } else if desktop_is(&["GNOME"]) {
+        Some(gnome::reserved)
+    } else {
+        None
+    }
 }
 
 fn window_system() -> Result<Box<dyn WindowSystem>> {
@@ -124,6 +139,14 @@ pub fn ensure_supported() -> Result<()> {
 }
 
 pub fn hotkeys(sink: Sink) -> Result<Box<dyn Hotkeys>> {
+    let inner = backend_hotkeys(sink)?;
+    Ok(match reserved_lookup() {
+        Some(lookup) => Box::new(reserved::Reserved::new(inner, lookup)),
+        None => inner,
+    })
+}
+
+fn backend_hotkeys(sink: Sink) -> Result<Box<dyn Hotkeys>> {
     match backend()? {
         // Cinnamon's menu swallows Super; those shortcuts go through Cinnamon itself.
         Backend::X11 if is_cinnamon() => Ok(Box::new(cinnamon::CinnamonHotkeys::new(sink)?)),
@@ -210,10 +233,10 @@ pub fn focus_pid(pid: u32) -> Result<bool> {
     }
 }
 
-/// Shortcuts the desktop itself uses, as `(HotKey id, "Cinnamon: Show desktop")`, so the settings window can
-/// warn before one is picked. Only Cinnamon so far.
+/// Shortcuts the desktop itself uses (Cinnamon, GNOME), as `(HotKey id, "GNOME: Show
+/// desktop")`, so the settings window can warn before one is picked.
 pub fn desktop_shortcuts() -> Vec<(u32, String)> {
-    if is_cinnamon() { cinnamon::reserved() } else { Vec::new() }
+    reserved_lookup().map(|lookup| lookup()).unwrap_or_default()
 }
 
 /// Super held right now, for the shortcut recorder when the desktop swallowed the key's

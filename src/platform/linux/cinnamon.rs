@@ -9,13 +9,11 @@
 //! System Settings → Keyboard → Shortcuts → Custom. They're replaced on every reload
 //! (which also clears leftovers from a crash) and removed on exit.
 
-use std::process::Command;
-use std::str::FromStr as _;
-
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 
 use super::gnome::parse_gvariant_strv;
 use super::hyprland::sh_quote;
+use super::reserved::{custom_shortcut, gsettings, schema_shortcuts, to_ids};
 use super::xkb;
 use crate::config::Shortcut;
 use crate::hotkeys::{GlobalHotkeys, Hotkeys, Sink};
@@ -31,14 +29,6 @@ fn entry_path(id: &str) -> String {
     format!("/org/cinnamon/desktop/keybindings/custom-keybindings/{id}/")
 }
 
-fn gsettings(args: &[&str]) -> Result<String> {
-    let out = Command::new("gsettings").args(args).output().context("running gsettings")?;
-    if !out.status.success() {
-        bail!("gsettings {}: {}", args.join(" "), String::from_utf8_lossy(&out.stderr).trim());
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
-}
-
 /// A string in `GVariant` text form, which `gsettings set` expects: `"a 'b'"`.
 fn gstr(s: &str) -> String {
     format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
@@ -50,63 +40,21 @@ fn strv(items: &[String]) -> String {
     format!("[{}]", quoted.join(", "))
 }
 
-/// `show-desktop` → `Show desktop`.
-fn pretty(key: &str) -> String {
-    let mut words = key.replace(['-', '_'], " ");
-    if let Some(first) = words.get_mut(..1) {
-        first.make_ascii_uppercase();
-    }
-    words
-}
-
-/// `(config keys, what for)` for Cinnamon's built-in shortcuts, from
-/// `gsettings list-recursively` output.
-fn builtin(listing: &str) -> Vec<(String, String)> {
-    let mut out = Vec::new();
-    for line in listing.lines().filter(|l| l.starts_with(SCHEMA)) {
-        let mut parts = line.splitn(3, ' ');
-        let (Some(_), Some(key), Some(value)) = (parts.next(), parts.next(), parts.next()) else {
-            continue;
-        };
-        if key == "custom-list" || !value.trim_start().starts_with(['[', '@']) {
-            continue;
-        }
-        for accel in parse_gvariant_strv(value) {
-            if let Some(keys) = xkb::from_gtk(&accel) {
-                out.push((keys, pretty(key)));
-            }
-        }
-    }
-    out
-}
-
-/// Every shortcut Cinnamon uses (built-in, and the user's own custom ones but not ours),
-/// as `(HotKey id, "Cinnamon: Show desktop")`.
+/// Every shortcut Cinnamon uses: built-in, and the user's custom ones (not ours).
 pub(super) fn reserved() -> Vec<(u32, String)> {
-    let mut found = builtin(&gsettings(&["list-recursively", SCHEMA]).unwrap_or_default());
-    for sub in ["wm", "media-keys"] {
-        let schema = format!("{SCHEMA}.{sub}");
-        found.extend(builtin(&gsettings(&["list-recursively", &schema]).unwrap_or_default()));
-    }
+    let mut found: Vec<(String, String)> = [
+        SCHEMA,
+        "org.cinnamon.desktop.keybindings.wm",
+        "org.cinnamon.desktop.keybindings.media-keys",
+    ]
+    .iter()
+    .flat_map(|s| schema_shortcuts(s))
+    .collect();
     let customs = gsettings(&["get", SCHEMA, "custom-list"]).unwrap_or_default();
     for id in parse_gvariant_strv(&customs).iter().filter(|id| !id.starts_with(PREFIX)) {
-        let schema = format!("{ENTRY_SCHEMA}:{}", entry_path(id));
-        let name = gsettings(&["get", &schema, "name"]).unwrap_or_default();
-        let name = name.trim_matches(['\'', '"']);
-        let binding = gsettings(&["get", &schema, "binding"]).unwrap_or_default();
-        for accel in parse_gvariant_strv(&binding) {
-            if let Some(keys) = xkb::from_gtk(&accel) {
-                found.push((keys, format!("your shortcut \"{name}\"")));
-            }
-        }
+        found.extend(custom_shortcut(&format!("{ENTRY_SCHEMA}:{}", entry_path(id))));
     }
-    found
-        .into_iter()
-        .filter_map(|(keys, what)| {
-            let id = global_hotkey::hotkey::HotKey::from_str(&keys).ok()?.id();
-            Some((id, format!("Cinnamon: {what}")))
-        })
-        .collect()
+    to_ids(found, "Cinnamon")
 }
 
 /// `XGrabKey` for most shortcuts, Cinnamon keybindings for the ones with Super.
@@ -159,21 +107,10 @@ impl CinnamonHotkeys {
 
 impl Hotkeys for CinnamonHotkeys {
     fn set(&mut self, shortcuts: &[Shortcut]) -> Vec<String> {
-        // Cinnamon grabs its own shortcuts first, so ours would never fire.
-        let reserved = reserved();
-        let mut failed = Vec::new();
-        let mut usable = Vec::new();
-        for s in shortcuts {
-            match reserved.iter().find(|(id, _)| *id == s.hotkey.id()) {
-                Some((_, why)) => failed.push(format!("{} (used by {why})", s.keys)),
-                None => usable.push(s),
-            }
-        }
         let (with_super, plain): (Vec<&Shortcut>, Vec<&Shortcut>) =
-            usable.into_iter().partition(|s| xkb::parse(&s.keys).is_some_and(|c| c.logo));
+            shortcuts.iter().partition(|s| xkb::parse(&s.keys).is_some_and(|c| c.logo));
         let plain: Vec<Shortcut> = plain.into_iter().cloned().collect();
-        failed.extend(self.grabs.set(&plain));
-
+        let mut failed = self.grabs.set(&plain);
         let binds: Vec<(String, u32, String)> = with_super
             .into_iter()
             .filter_map(|s| Some((xkb::parse(&s.keys)?.gtk(), s.hotkey.id(), s.keys.clone())))
@@ -198,26 +135,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn finds_cinnamon_bindings() {
-        let listing = "\
-org.cinnamon.desktop.keybindings.wm show-desktop ['<Super>d']
-org.cinnamon.desktop.keybindings.wm switch-to-workspace-right ['<Control><Alt>Right', '<Super>Page_Down']
-org.cinnamon.desktop.keybindings.wm toggle-recording @as []
-org.cinnamon.desktop.keybindings.media-keys volume-mute ['XF86AudioMute']
-org.cinnamon.desktop.keybindings custom-list ['custom0']
-org.cinnamon.desktop.keybindings looking-glass-keybinding ['<Super>l']
-org.gnome.desktop.wm.keybindings minimize ['<Super>h']
-";
-        let found = builtin(listing);
-        assert_eq!(
-            found,
-            [
-                ("super+d".into(), "Show desktop".into()),
-                ("ctrl+alt+right".into(), "Switch to workspace right".into()),
-                ("super+pagedown".into(), "Switch to workspace right".into()),
-                ("super+l".into(), "Looking glass keybinding".into()),
-            ]
-        );
+    fn gvariant_text() {
         assert_eq!(strv(&["a".into(), "appkey0".into()]), r#"["a", "appkey0"]"#);
         assert_eq!(gstr(r#"'/o"x\appkey' __hotkey 1"#), r#""'/o\"x\\appkey' __hotkey 1""#);
     }

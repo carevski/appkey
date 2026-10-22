@@ -148,6 +148,36 @@ pub(super) fn parse_gvariant_strv(s: &str) -> Vec<String> {
         .collect()
 }
 
+/// Every shortcut GNOME uses itself (Shell, Mutter, settings daemon, and the Ubuntu
+/// Dock's Super+number keys when they're on), plus the user's custom ones from
+/// Settings → Keyboard.
+pub(super) fn reserved() -> Vec<(u32, String)> {
+    use super::reserved::{custom_shortcut, gsettings, schema_shortcuts, to_ids};
+    const MEDIA: &str = "org.gnome.settings-daemon.plugins.media-keys";
+    const DOCK: &str = "org.gnome.shell.extensions.dash-to-dock";
+    let mut found: Vec<(String, String)> = [
+        "org.gnome.desktop.wm.keybindings",
+        "org.gnome.shell.keybindings",
+        "org.gnome.mutter.keybindings",
+        "org.gnome.mutter.wayland.keybindings",
+        MEDIA,
+    ]
+    .iter()
+    .flat_map(|s| schema_shortcuts(s))
+    .collect();
+    if gsettings(&["get", DOCK, "hot-keys"]).is_ok_and(|v| v == "true") {
+        let dock = schema_shortcuts(DOCK);
+        found.extend(
+            dock.into_iter().map(|(k, w)| (k, format!("Ubuntu Dock {}", w.to_lowercase()))),
+        );
+    }
+    let paths = gsettings(&["get", MEDIA, "custom-keybindings"]).unwrap_or_default();
+    for path in parse_gvariant_strv(&paths) {
+        found.extend(custom_shortcut(&format!("{MEDIA}.custom-keybinding:{path}")));
+    }
+    to_ids(found, "GNOME")
+}
+
 /// Shortcuts grabbed by the extension; it reports presses as `Activated(action)`.
 pub(super) struct ShellHotkeys {
     conn: Connection,
