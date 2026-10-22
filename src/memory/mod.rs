@@ -554,7 +554,7 @@ mod tests {
         }
         assert_eq!(busy, vec![1]);
         // A new process with the same pid (different start) starts from scratch.
-        assert!(t.update(1400.0, &[(1, 9, 999_999)], 300.0, hz).is_empty());
+        assert_eq!(t.update(1400.0, &[(1, 9, 999_999)], 300.0, hz), Vec::<u32>::new());
     }
 
     #[test]
