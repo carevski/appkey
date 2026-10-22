@@ -93,6 +93,7 @@ impl Row {
 }
 
 #[derive(Debug)]
+#[allow(clippy::struct_excessive_bools)] // independent UI state flags
 struct Settings {
     path: PathBuf,
     tab: Tab,
@@ -110,6 +111,8 @@ struct Settings {
     /// Set when the file couldn't be read; saving is disabled so we never clobber it.
     load_error: Option<String>,
     recording: Option<usize>,
+    /// Super / Win key held (egui reports it only on macOS); see [`keys::super_after`].
+    super_down: bool,
     picker: Option<(usize, Picker)>,
     status: Option<(String, bool)>,
     confirm_close: bool,
@@ -143,6 +146,7 @@ impl Settings {
             memory_tab: crate::memory::available().then(memory::MemoryTab::new),
             load_error,
             recording: None,
+            super_down: false,
             picker: None,
             status: None,
             confirm_close: false,
@@ -216,8 +220,10 @@ impl Settings {
                     ui.label("");
                     ui.label("");
                     ui.end_row();
+                    let super_down = self.super_down;
                     for (i, row) in self.rows.iter_mut().enumerate() {
-                        self.recording = key_button(ui, i, row, self.recording, &mut self.status);
+                        self.recording =
+                            key_button(ui, i, row, self.recording, super_down, &mut self.status);
                         let app_text = if row.app.is_empty() {
                             "Choose app…".to_owned()
                         } else {
@@ -327,6 +333,7 @@ fn key_button(
     i: usize,
     row: &mut Row,
     recording: Option<usize>,
+    super_down: bool,
     status: &mut Option<(String, bool)>,
 ) -> Option<usize> {
     let active = recording == Some(i);
@@ -352,19 +359,14 @@ fn key_button(
         return None;
     }
     let pressed = ui.input_mut(|input| {
-        let found = input.events.iter().find_map(|e| match e {
-            egui::Event::Key { key, pressed: true, repeat: false, modifiers, .. } => {
-                Some((*key, *modifiers))
-            }
-            _ => None,
-        });
+        let found = keys::scan(&input.events, super_down);
         // Keep the press away from other widgets (Tab, Enter, Esc closing dialogs…).
         if found.is_some() {
             input.events.retain(|e| !matches!(e, egui::Event::Key { .. } | egui::Event::Text(_)));
         }
         found
     });
-    match pressed.map(|(k, m)| keys::record(k, m)) {
+    match pressed {
         Some(Recorded::Combo(c)) => {
             row.keys = c;
             *status = None;
@@ -382,6 +384,9 @@ fn key_button(
 impl eframe::App for Settings {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        // State at the start of this frame goes to the key buttons; remember the end state.
+        let super_down = self.super_down;
+        let super_after = ctx.input(|i| keys::super_after(&i.events, super_down));
         #[cfg(debug_assertions)]
         if let Some(shot) = &mut self.devshot {
             if shot.scene == "picker" && self.picker.is_none() && !self.rows.is_empty() {
@@ -451,5 +456,6 @@ impl eframe::App for Settings {
                 }
             }
         });
+        self.super_down = super_after;
     }
 }
