@@ -5,6 +5,8 @@ mod app;
 mod config;
 mod hotkeys;
 mod matcher;
+#[cfg(any(target_os = "linux", test))]
+mod memory;
 mod platform;
 mod ui;
 
@@ -25,6 +27,7 @@ COMMANDS:
     check         Validate the config and show platform notes
     list          Show running apps and the names to use as `app` in the config
     open <app>    Focus or launch <app> once, exactly like a shortcut would
+    memory        Show the programs using the most memory, and close them (Ubuntu/Mint)
     config        Print the config file path
     help          Show this help
     version       Show the version
@@ -57,6 +60,9 @@ fn cli(args: &[String]) -> Result<()> {
         }
         ["open", app] => open(&path, app),
         ["settings"] => ui::run(path),
+        ["memory"] => memory_window(false),
+        // Opened by the daemon when memory runs low (see memory::Watcher).
+        ["memory", "--alert"] => memory_window(true),
         // Run by desktops that execute a command per shortcut (Hyprland binds).
         ["__hotkey", id] => run_hotkey(&path, id),
         // Test helper (undocumented): the id desktops know a shortcut by.
@@ -94,6 +100,19 @@ fn check(path: &Path) -> Result<()> {
         println!("{note}");
     }
     platform::ensure_supported()
+}
+
+#[cfg(target_os = "linux")]
+fn memory_window(alert: bool) -> Result<()> {
+    if ui::memory_window(alert)? {
+        std::process::exit(memory::SNOOZE_EXIT);
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn memory_window(_alert: bool) -> Result<()> {
+    bail!("`appkey memory` is only available on Ubuntu and Linux Mint")
 }
 
 /// Does what the shortcut with this `HotKey` id is configured to do.

@@ -125,6 +125,33 @@ Combinations with two modifiers are the safest: <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+*
 
 ---
 
+## Low memory and frozen desktops (Ubuntu, Linux Mint)
+
+On Ubuntu, Linux Mint and other Ubuntu-based systems, the settings window has a **Memory** tab with two tools.
+
+**Low-memory warning.** Tick *Warn me before the computer runs out of memory* and click **Save**. When free memory stays below the limit you set (10% by default), or programs keep waiting on memory (20% of the time by default), appkey opens a window listing your biggest programs. Tick the ones you don't need and click **Close selected**: they're asked to quit, like closing their windows, so they can save first. If one doesn't react within 5 seconds, a **Force quit** button appears. **Snooze for an hour** keeps the warning away for an hour; **Dismiss** for 5 minutes. You can open the same window any time with **Show memory use now…** or `appkey memory`. appkey only offers your own programs, never parts of the desktop itself.
+
+**Emergency keys (Magic SysRq).** If the computer freezes before you can react, these keys still work because the Linux kernel handles them, not the desktop. Hold <kbd>Alt</kbd> and <kbd>PrtSc</kbd> (SysRq), then press:
+
+| Key | What it does |
+|---|---|
+| <kbd>F</kbd> | Closes the program using the most memory. Press once and wait a few seconds. |
+| <kbd>R</kbd> <kbd>E</kbd> <kbd>I</kbd> <kbd>S</kbd> <kbd>U</kbd> <kbd>B</kbd> | Safe restart when nothing else helps. Press the letters slowly, about 2 seconds apart. |
+| <kbd>H</kbd> | Test: only writes help to the kernel log (`sudo dmesg \| tail`). |
+
+Ubuntu and Mint switch <kbd>F</kbd> off by default (setting 176). Choose **Recommended (240)** and click **Apply…**. Your system asks for your password, possibly twice: once to save the setting to `/etc/sysctl.d/90-appkey-sysrq.conf` and once to apply it now. Prefer a terminal? The tab shows the equivalent command to copy. It's off by default because on shared computers someone at a locked screen could use it to close the lock screen, and because <kbd>Alt</kbd>+<kbd>PrtSc</kbd> is also the window-screenshot shortcut. On a computer only you use, 240 is a sensible middle ground.
+
+In the config file, the warning looks like this:
+
+```toml
+[memory_watch]
+enabled = true
+min_available_percent = 10   # warn below this much free memory (2–50)
+max_pressure_percent = 20    # …or when programs wait on memory this often (0 = never)
+```
+
+---
+
 ## Command line
 
 appkey also has a few terminal commands. They're optional, but useful for setup and troubleshooting:
@@ -136,6 +163,7 @@ appkey also has a few terminal commands. They're optional, but useful for setup 
 | `appkey list` | Show open apps and the names to use for `app` |
 | `appkey check` | Check your config for mistakes and show notes for your system |
 | `appkey open firefox` | Do exactly what a shortcut for `firefox` would do, once |
+| `appkey memory` | Show the programs using the most memory, and close them (Ubuntu, Mint) |
 | `appkey config` | Show where the config file is |
 
 On Windows, tick **Add appkey to PATH** in the installer to use these from a terminal.
@@ -146,6 +174,7 @@ On Windows, tick **Add appkey to PATH** in the installer to use these from a ter
 
 - appkey needs **no special permissions** on any system. It doesn't read your keystrokes: it asks the system to tell it when *your* shortcuts are pressed.
 - It never runs commands through a shell. `launch` starts exactly the program you list.
+- **Linux:** the low-memory window can only close your own programs, and it never runs as administrator. Changing the SysRq setting is the one thing that needs administrator rights: your system's own password prompt asks for it, and only for writing that one setting.
 - Your config decides which programs run, so on macOS and Linux appkey refuses to use it if other users on the computer could edit it.
 - **Windows:** an app running *as administrator* can only be brought to the front if appkey also runs as administrator. appkey tells you when this happens rather than working around Windows' protection.
 

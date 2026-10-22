@@ -58,6 +58,10 @@ pub struct App {
     /// Modification time of the config we last loaded.
     loaded_mtime: Option<SystemTime>,
     settings_window: Option<Child>,
+    #[cfg(target_os = "linux")]
+    memory_watch: config::MemoryWatch,
+    #[cfg(target_os = "linux")]
+    memory: crate::memory::Watcher,
 }
 
 impl std::fmt::Debug for App {
@@ -114,6 +118,10 @@ impl App {
             quit: quit.id().clone(),
             loaded_mtime: None,
             settings_window: None,
+            #[cfg(target_os = "linux")]
+            memory_watch: config::MemoryWatch::default(),
+            #[cfg(target_os = "linux")]
+            memory: crate::memory::Watcher::default(),
         };
         app.reload();
         Ok(app)
@@ -149,6 +157,10 @@ impl App {
                 } else if config_mtime(&self.config_path) != self.loaded_mtime {
                     self.reload();
                 }
+                #[cfg(target_os = "linux")]
+                if let Err(e) = self.memory.tick(self.memory_watch) {
+                    self.set_status(&format!("{e:#}"));
+                }
             }
         }
         Flow::Continue
@@ -176,12 +188,17 @@ impl App {
     fn reload(&mut self) {
         self.active.clear();
         self.loaded_mtime = config_mtime(&self.config_path);
+        let cfg = config::load_or_init(&self.config_path);
+        #[cfg(target_os = "linux")]
+        {
+            self.memory_watch = cfg.as_ref().map(|c| c.memory_watch).unwrap_or_default();
+        }
 
         let Some(hotkeys) = self.hotkeys.as_mut() else {
             let msg = format!("shortcuts unavailable: {}", self.hotkeys_error);
             return self.set_status(&msg);
         };
-        let cfg = match config::load_or_init(&self.config_path) {
+        let cfg = match cfg {
             Ok(cfg) => cfg,
             Err(e) => {
                 hotkeys.set(&[]);

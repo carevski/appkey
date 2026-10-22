@@ -6,14 +6,18 @@
 mod devshot;
 mod font;
 mod keys;
+#[cfg(target_os = "linux")]
+mod memory;
 mod picker;
+#[cfg(target_os = "linux")]
+mod pressure;
 
 use std::path::PathBuf;
 
 use anyhow::{Result, anyhow};
 use eframe::egui::{self, Button, Color32, RichText};
 
-use crate::config::{self, Entry};
+use crate::config::{self, Document, Entry, MemoryWatch};
 use crate::platform::{self, AppInfo};
 use keys::Recorded;
 use picker::Picker;
@@ -23,7 +27,7 @@ pub fn run(config_path: PathBuf) -> Result<()> {
         viewport: egui::ViewportBuilder::default()
             .with_title("appkey settings")
             .with_app_id("appkey")
-            .with_inner_size([640.0, 440.0])
+            .with_inner_size([660.0, 560.0])
             .with_min_inner_size([520.0, 300.0]),
         ..Default::default()
     };
@@ -38,9 +42,17 @@ pub fn run(config_path: PathBuf) -> Result<()> {
     .map_err(|e| anyhow!("could not open the settings window: {e}"))
 }
 
+/// `appkey memory [--alert]`. Returns `true` if the user snoozed the warning.
+#[cfg(target_os = "linux")]
+pub fn memory_window(alert: bool) -> Result<bool> {
+    pressure::run(alert)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Tab {
     Shortcuts,
+    #[cfg(target_os = "linux")]
+    Memory,
 }
 
 /// One editable shortcut (an [`Entry`] for this OS).
@@ -88,6 +100,13 @@ struct Settings {
     saved: Vec<Row>,
     /// Entries for other OSes: not shown, written back untouched.
     others: Vec<Entry>,
+    memory_watch: MemoryWatch,
+    saved_memory_watch: MemoryWatch,
+    /// Whether the file has a `[memory_watch]` section (we don't add one for defaults).
+    had_memory_watch: bool,
+    /// `None` where the Memory tab isn't offered (not Ubuntu / Mint).
+    #[cfg(target_os = "linux")]
+    memory_tab: Option<memory::MemoryTab>,
     /// Set when the file couldn't be read; saving is disabled so we never clobber it.
     load_error: Option<String>,
     recording: Option<usize>,
@@ -101,13 +120,15 @@ struct Settings {
 
 impl Settings {
     fn load(path: PathBuf) -> Self {
-        let read = config::ensure_exists(&path).and_then(|_| config::read_entries(&path));
-        let (entries, load_error) = match read {
-            Ok(e) => (e, None),
-            Err(e) => (Vec::new(), Some(format!("{e:#}"))),
+        let read = config::ensure_exists(&path).and_then(|_| config::read_document(&path));
+        let (doc, load_error) = match read {
+            Ok(d) => (d, None),
+            Err(e) => (Document::default(), Some(format!("{e:#}"))),
         };
+        let had_memory_watch = doc.memory_watch.is_some();
+        let memory_watch = doc.memory_watch.unwrap_or_default();
         let (here, others): (Vec<Entry>, Vec<Entry>) =
-            entries.into_iter().partition(Entry::applies_here);
+            doc.shortcuts.into_iter().partition(Entry::applies_here);
         let rows: Vec<Row> = here.into_iter().map(Row::from_entry).collect();
         Self {
             path,
@@ -115,6 +136,11 @@ impl Settings {
             saved: rows.clone(),
             rows,
             others,
+            memory_watch,
+            saved_memory_watch: memory_watch,
+            had_memory_watch,
+            #[cfg(target_os = "linux")]
+            memory_tab: crate::memory::available().then(memory::MemoryTab::new),
             load_error,
             recording: None,
             picker: None,
@@ -127,7 +153,7 @@ impl Settings {
     }
 
     fn dirty(&self) -> bool {
-        self.rows != self.saved
+        self.rows != self.saved || self.memory_watch != self.saved_memory_watch
     }
 
     /// Per-row problem, if any. Saving is blocked while there are problems.
@@ -151,14 +177,20 @@ impl Settings {
     }
 
     fn save(&mut self) -> bool {
-        let mut entries: Vec<Entry> = self.rows.iter().map(Row::to_entry).collect();
-        let result = config::validate(entries.clone()).and_then(|_| {
-            entries.extend(self.others.iter().cloned());
-            config::save_entries(&self.path, &entries)
-        });
+        let mut shortcuts: Vec<Entry> = self.rows.iter().map(Row::to_entry).collect();
+        let keep_watch = self.had_memory_watch || self.memory_watch != MemoryWatch::default();
+        let memory_watch = keep_watch.then_some(self.memory_watch);
+        let result =
+            config::validate_document(Document { memory_watch, shortcuts: shortcuts.clone() })
+                .and_then(|_| {
+                    shortcuts.extend(self.others.iter().cloned());
+                    config::save_document(&self.path, &Document { memory_watch, shortcuts })
+                });
         match result {
             Ok(()) => {
                 self.saved = self.rows.clone();
+                self.saved_memory_watch = self.memory_watch;
+                self.had_memory_watch = keep_watch;
                 self.status =
                     Some(("Saved. appkey picks up the changes automatically.".into(), false));
                 true
@@ -247,6 +279,7 @@ impl Settings {
                 }
                 if ui.add_enabled(self.dirty(), Button::new("Revert")).clicked() {
                     self.rows.clone_from(&self.saved);
+                    self.memory_watch = self.saved_memory_watch;
                     self.recording = None;
                     self.status = None;
                 }
@@ -355,6 +388,11 @@ impl eframe::App for Settings {
                 shot.scene.clear();
                 self.picker = Some((0, Picker::new(Some(&self.rows[0].app_info()))));
             }
+            #[cfg(target_os = "linux")]
+            if shot.scene == "memory" && self.memory_tab.is_some() {
+                shot.scene.clear();
+                self.tab = Tab::Memory;
+            }
             shot.tick(&ctx);
         }
         self.handle_close(&ctx);
@@ -378,6 +416,10 @@ impl eframe::App for Settings {
             ui.add_space(4.0);
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut self.tab, Tab::Shortcuts, "Shortcuts");
+                #[cfg(target_os = "linux")]
+                if self.memory_tab.is_some() {
+                    ui.selectable_value(&mut self.tab, Tab::Memory, "Memory");
+                }
             });
             ui.add_space(2.0);
         });
@@ -401,6 +443,12 @@ impl eframe::App for Settings {
             }
             match self.tab {
                 Tab::Shortcuts => self.shortcuts_tab(ui),
+                #[cfg(target_os = "linux")]
+                Tab::Memory => {
+                    if let Some(tab) = &mut self.memory_tab {
+                        tab.show(ui, &mut self.memory_watch);
+                    }
+                }
             }
         });
     }
