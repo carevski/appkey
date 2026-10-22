@@ -9,11 +9,57 @@ use anyhow::{Context, Result, bail};
 use global_hotkey::hotkey::HotKey;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Default, Deserialize, Serialize)]
+/// The whole file exactly as written (unvalidated). The settings window edits
+/// this and writes it back.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct RawConfig {
+pub struct Document {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_watch: Option<MemoryWatch>,
     #[serde(default, rename = "shortcut")]
-    shortcuts: Vec<Entry>,
+    pub shortcuts: Vec<Entry>,
+}
+
+/// `[memory_watch]`: warn before the system runs out of memory (Ubuntu / Linux Mint only;
+/// kept but ignored elsewhere).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct MemoryWatch {
+    pub enabled: bool,
+    /// Warn when available memory drops below this share of RAM.
+    pub min_available_percent: u8,
+    /// Also warn when tasks stall on memory this share of the time (PSI "some", 10 s
+    /// average). 0 turns this check off.
+    pub max_pressure_percent: u8,
+}
+
+impl Default for MemoryWatch {
+    fn default() -> Self {
+        Self { enabled: false, min_available_percent: 10, max_pressure_percent: 20 }
+    }
+}
+
+impl MemoryWatch {
+    pub const AVAILABLE_RANGE: std::ops::RangeInclusive<u8> = 2..=50;
+    pub const PRESSURE_RANGE: std::ops::RangeInclusive<u8> = 0..=90;
+
+    pub fn validate(self) -> Result<()> {
+        if !Self::AVAILABLE_RANGE.contains(&self.min_available_percent) {
+            bail!(
+                "memory_watch: min_available_percent must be between {} and {}",
+                Self::AVAILABLE_RANGE.start(),
+                Self::AVAILABLE_RANGE.end()
+            );
+        }
+        if !Self::PRESSURE_RANGE.contains(&self.max_pressure_percent) {
+            bail!(
+                "memory_watch: max_pressure_percent must be between {} and {} (0 = off)",
+                Self::PRESSURE_RANGE.start(),
+                Self::PRESSURE_RANGE.end()
+            );
+        }
+        Ok(())
+    }
 }
 
 /// One `[[shortcut]]` exactly as written in the file (unvalidated). The settings
@@ -54,6 +100,8 @@ pub struct Shortcut {
 #[derive(Debug, Default)]
 pub struct Config {
     pub shortcuts: Vec<Shortcut>,
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub memory_watch: MemoryWatch,
 }
 
 pub const CURRENT_OS: &str = std::env::consts::OS;
@@ -78,20 +126,19 @@ pub fn ensure_exists(path: &Path) -> Result<bool> {
 /// Loads and validates the config, creating the example file on first run.
 pub fn load_or_init(path: &Path) -> Result<Config> {
     ensure_exists(path)?;
-    validate(read_entries(path)?).with_context(|| format!("in {}", path.display()))
+    validate_document(read_document(path)?).with_context(|| format!("in {}", path.display()))
 }
 
-/// Reads the raw entries (all OSes) without validating them.
-pub fn read_entries(path: &Path) -> Result<Vec<Entry>> {
+/// Reads the whole file (shortcuts for all OSes) without validating it.
+pub fn read_document(path: &Path) -> Result<Document> {
     check_permissions(path)?;
     let text = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-    let raw: RawConfig = toml::from_str(&text).with_context(|| format!("in {}", path.display()))?;
-    Ok(raw.shortcuts)
+    toml::from_str(&text).with_context(|| format!("in {}", path.display()))
 }
 
-/// Writes entries atomically (temp file + rename), readable only by the user.
-pub fn save_entries(path: &Path, entries: &[Entry]) -> Result<()> {
-    let body = toml::to_string(&RawConfig { shortcuts: entries.to_vec() })?;
+/// Writes the file atomically (temp file + rename), readable only by the user.
+pub fn save_document(path: &Path, doc: &Document) -> Result<()> {
+    let body = toml::to_string(doc)?;
     let tmp = path.with_extension("toml.tmp");
     let _ = fs::remove_file(&tmp);
     write_new(&tmp, &format!("{SAVED_HEADER}\n{body}"))?;
@@ -105,8 +152,14 @@ const SAVED_HEADER: &str = "\
 
 #[cfg(test)]
 fn parse(text: &str) -> Result<Config> {
-    let raw: RawConfig = toml::from_str(text)?;
-    validate(raw.shortcuts)
+    validate_document(toml::from_str(text)?)
+}
+
+/// Validates everything in the file that applies to this OS.
+pub fn validate_document(doc: Document) -> Result<Config> {
+    let memory_watch = doc.memory_watch.unwrap_or_default();
+    memory_watch.validate()?;
+    Ok(Config { memory_watch, ..validate(doc.shortcuts)? })
 }
 
 /// Checks entries for the current OS and turns them into registrable shortcuts.
@@ -137,7 +190,7 @@ pub fn validate(entries: Vec<Entry>) -> Result<Config> {
         }
         shortcuts.push(Shortcut { hotkey, keys: s.keys, app: s.app, launch: s.launch });
     }
-    Ok(Config { shortcuts })
+    Ok(Config { shortcuts, memory_watch: MemoryWatch::default() })
 }
 
 /// The config decides which programs we execute, so on Unix refuse a file that
@@ -259,6 +312,19 @@ mod tests {
     }
 
     #[test]
+    fn memory_watch_defaults_and_limits() {
+        assert_eq!(parse("").unwrap().memory_watch, MemoryWatch::default());
+        let cfg = parse("[memory_watch]\nenabled = true\nmin_available_percent = 5").unwrap();
+        assert_eq!(
+            cfg.memory_watch,
+            MemoryWatch { enabled: true, min_available_percent: 5, max_pressure_percent: 20 }
+        );
+        assert!(parse("[memory_watch]\nmin_available_percent = 0").is_err());
+        assert!(parse("[memory_watch]\nmax_pressure_percent = 100").is_err());
+        assert!(parse("[memory_watch]\nfoo = 1").is_err());
+    }
+
+    #[test]
     fn parses_launch_and_keys() {
         let cfg = parse(
             "[[shortcut]]\nkeys = \"ctrl+alt+t\"\napp = \"term\"\nlaunch = [\"term\", \"--new\"]",
@@ -290,10 +356,15 @@ mod tests {
                 ..Entry::default()
             },
         ];
-        save_entries(&path, &entries).unwrap();
-        assert_eq!(read_entries(&path).unwrap(), entries);
-        save_entries(&path, &entries[..1]).unwrap(); // overwrite works
-        assert_eq!(read_entries(&path).unwrap().len(), 1);
+        let doc = Document {
+            shortcuts: entries,
+            memory_watch: Some(MemoryWatch { enabled: true, ..MemoryWatch::default() }),
+        };
+        save_document(&path, &doc).unwrap();
+        assert_eq!(read_document(&path).unwrap(), doc);
+        let one = Document { shortcuts: doc.shortcuts[..1].to_vec(), memory_watch: None };
+        save_document(&path, &one).unwrap(); // overwrite works
+        assert_eq!(read_document(&path).unwrap(), one);
         fs::remove_dir_all(&dir).unwrap();
     }
 

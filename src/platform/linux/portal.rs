@@ -120,7 +120,7 @@ impl PortalHotkeys {
             let _ = tx.send(responses.next());
         });
         let msg = rx
-            .recv_timeout(Duration::from_secs(120))
+            .recv_timeout(Duration::from_mins(2))
             .map_err(|_| anyhow!("no answer from the desktop portal"))?
             .ok_or_else(|| anyhow!("portal connection closed"))??;
         let (code, results): (u32, Options) = msg.body().deserialize()?;

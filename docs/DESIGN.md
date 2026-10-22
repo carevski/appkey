@@ -45,6 +45,16 @@ The daemon and the settings window are **two processes from the same binary**. E
 - **The tray is optional.** If it can't be created (no StatusNotifier host / D-Bus), shortcuts still work, and settings open with `appkey settings`.
 - **Hand-rolled CLI.** Five subcommands don't justify `clap`'s size.
 
+## Low memory and Magic SysRq (Ubuntu / Linux Mint)
+
+The settings window has a **Memory** tab, shown only when `/etc/os-release` says Ubuntu or a derivative (`ID`/`ID_LIKE` contains `ubuntu` or `linuxmint`). The code lives in `src/memory/` (parsers, shared by all hosts for tests), `ui/memory.rs` (the tab) and `ui/pressure.rs` (the warning window).
+
+- **Detection: `MemAvailable` and PSI, once a second in the daemon.** We warn when available memory is below `min_available_percent` of RAM, or when `/proc/pressure/memory` `some avg10` reaches `max_pressure_percent`. The condition must hold for 3 consecutive ticks, then we stay quiet for 5 min after the window closes (1 h if snoozed; the window exits with code 3 to say so). Reading two small `/proc` files a second costs nothing measurable.
+- **The warning is a separate process** (`appkey memory --alert`), like settings, so the daemon never loads GL. It starts while memory is low but not yet exhausted, which is why the default thresholds are early ones. It's always-on-top, but doesn't take focus by force.
+- **Closing programs is `SIGTERM`, then optionally `SIGKILL`,** grouped by process name (all `firefox` processes together), only for our own uid, and never for session/desktop processes (`memory::PROTECTED`). Before signalling we re-read `/proc/<pid>/status` so a pid reused since the list was drawn is left alone. No elevation: other users' processes aren't listed at all.
+- **SysRq needs root, so it goes through the OS's own prompt.** `pkexec` runs two fixed argvs, `/usr/bin/tee /etc/sysctl.d/90-appkey-sysrq.conf` (contents on stdin) and `/usr/sbin/sysctl -q -p` on that file. No shell, absolute paths, and appkey itself never runs as root. That can mean two password prompts; we accept that over running our own binary as root. The `90-` name sorts after Ubuntu's `10-magic-sysrq.conf`, so it wins at boot. The tab also shows the equivalent terminal command.
+- **Why not more distros:** asked for Ubuntu/Mint. Nothing here is Ubuntu-specific except the default (176) we describe; widening means changing `is_supported_distro`.
+
 ## Security & permissions by OS
 
 | OS | What's needed | How we handle it |
@@ -52,6 +62,7 @@ The daemon and the settings window are **two processes from the same binary**. E
 | macOS | Nothing. Carbon hotkeys and LaunchServices need no Accessibility, Input Monitoring or Automation permission. | If we ever need per-window control (AXUIElement), we must call `AXIsProcessTrustedWithOptions` with the prompt option and explain why first. Unsigned downloads are quarantined by Gatekeeper; signing/notarization is a release task. |
 | Windows | Nothing. | UIPI: windows of elevated processes can't be fully controlled from a non-elevated appkey. We report it rather than auto-elevating. Unsigned exes trigger SmartScreen; signing is a release task. |
 | Linux X11 | Nothing. X11 has no permission model. | n/a |
+| Linux (Ubuntu / Mint), Memory tab | Changing `kernel.sysrq` needs root. | `pkexec` with fixed argvs shows the desktop's own password prompt; cancelling is reported, not retried. The warning window only signals the user's own processes. |
 | Linux Wayland | GNOME: the user keeps an extension enabled (visible and switchable in the Extensions app). KDE: the user approves shortcuts in KDE's dialog. Hyprland: nothing. | We never bypass the desktop: the extension only acts on appkey's D-Bus calls, the KDE dialog is the portal's own, and a cancelled approval is respected (reported, never overridden). The GNOME extension's D-Bus methods are reachable by any process of the same user, which can already control the session. |
 
 ## Linux backends
