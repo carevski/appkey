@@ -123,6 +123,10 @@ A global shortcut works everywhere, so it **takes the combination away from ever
 Using <kbd>Ctrl</kbd>+<kbd>T</kbd>, for example, would stop "new tab" from working in your browser.
 Combinations with two modifiers are the safest: <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+*letter*, or <kbd>Super</kbd>/<kbd>Cmd</kbd>+<kbd>Shift</kbd>+*letter*.
 
+- **The Windows / Super key** works as a modifier, e.g. <kbd>Super</kbd>+<kbd>T</kbd>. Your desktop already uses some of these combinations (Windows: <kbd>Win</kbd>+<kbd>E</kbd>, <kbd>Win</kbd>+<kbd>L</kbd>, …; Linux Mint: <kbd>Super</kbd>+<kbd>L</kbd>, <kbd>Super</kbd>+<kbd>D</kbd>, …). If one is taken, the tray menu says it's unavailable.
+- **F1–F24** can be used on their own, without a modifier. On laptops where the top row controls brightness and volume, hold <kbd>Fn</kbd> while recording so the key sends F5 and not "brightness up".
+- **The Fn key itself** can't be part of a shortcut. The keyboard handles it internally and never tells the computer it was pressed, so no app can see it.
+
 ---
 
 ## Low memory and frozen desktops (Ubuntu, Linux Mint)
