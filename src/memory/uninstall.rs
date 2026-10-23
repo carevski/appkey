@@ -264,120 +264,39 @@ pub fn launches_appimage(desktop_entry: &str, appimage: &str) -> bool {
     })
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn facts(exe: &str) -> Facts {
-        Facts { exe: Some(exe.into()), ..Facts::default() }
-    }
-
-    #[test]
-    fn detects_install_sources() {
-        assert_eq!(
-            detect(&facts("/snap/spotify/83/usr/share/spotify/spotify")),
-            Source::Snap { name: "spotify".into() }
-        );
-        let flatpak = "[Application]\nname=com.spotify.Client\nruntime=runtime/org.freedesktop.Platform/x86_64/24.08\n\n\
-                       [Instance]\ninstance-id=123\napp-path=/var/lib/flatpak/app/com.spotify.Client/x86_64/stable/abc/files\n";
-        assert_eq!(
-            detect(&Facts { flatpak_info: Some(flatpak.into()), ..facts("/app/bin/spotify") }),
-            Source::Flatpak { id: "com.spotify.Client".into(), user: false }
-        );
-        let user = flatpak.replace("/var/lib/flatpak", "/home/me/.local/share/flatpak");
-        assert_eq!(parse_flatpak_info(&user), Some(("com.spotify.Client".into(), true)));
-        assert_eq!(
-            detect(&Facts {
-                appimage: Some("/home/me/Apps/Obsidian.AppImage".into()),
-                ..facts("/tmp/.mount_ObsXy/obsidian")
-            }),
-            Source::AppImage { path: "/home/me/Apps/Obsidian.AppImage".into() }
-        );
-        assert_eq!(
-            detect(&facts("/home/me/.local/share/JetBrains/Toolbox/apps/intellij-idea/bin/idea")),
-            Source::Toolbox
-        );
-        assert_eq!(
-            detect(&Facts {
-                deb_package: Some("google-chrome-stable".into()),
-                ..facts("/opt/google/chrome/chrome")
-            }),
-            Source::Deb { package: "google-chrome-stable".into() }
-        );
-        assert_eq!(
-            detect(&facts("/opt/someapp/someapp")),
-            Source::Unknown { path: Some("/opt/someapp/someapp".into()) }
-        );
-    }
-
-    #[test]
-    fn parses_tool_output() {
-        assert_eq!(parse_dpkg_search("geany: /usr/bin/geany\n").as_deref(), Some("geany"));
-        assert_eq!(
-            parse_dpkg_search("libfoo1:amd64: /usr/lib/x/libfoo.so.1\n").as_deref(),
-            Some("libfoo1")
-        );
-        assert_eq!(parse_dpkg_search("a, b: /usr/share/doc\n"), None);
-        assert_eq!(parse_dpkg_search("dpkg-query: no path found matching pattern /opt/x\n"), None);
-        let sim =
-            "Reading package lists...\nRemv geany [2.0-1build2]\nRemv geany-common [2.0-1build2]\n";
-        assert_eq!(parse_apt_simulation(sim), ["geany", "geany-common"]);
-    }
-
-    #[test]
-    fn refuses_dangerous_removals() {
-        let s = |v: &[&str]| v.iter().map(|x| (*x).to_owned()).collect::<Vec<_>>();
-        assert_eq!(refusal(&s(&["geany", "geany-common"])), None);
-        assert!(refusal(&s(&["firefox", "cinnamon-core", "mint-meta-cinnamon"])).is_some());
-        assert!(refusal(&s(&["foo", "xserver-xorg-core"])).is_some());
-        assert!(refusal(&[]).is_some());
-        let many: Vec<String> = (0..=MAX_REMOVALS).map(|i| format!("pkg{i}")).collect();
-        assert!(refusal(&many).is_some());
-    }
-
-    #[test]
-    fn validates_names_and_builds_commands() {
-        assert!(valid_package("google-chrome-stable") && valid_package("g++-13"));
-        for bad in ["", "Foo", "-x", "a;rm -rf /", "a b", "../x"] {
-            assert!(!valid_package(bad), "{bad}");
+/// Whether a process belongs to this installation, beyond the clicked row (tray helpers,
+/// crash reporters…): a snap's run from `/snap/<name>/` or in its `snap.<name>.` cgroup,
+/// a Flatpak's in its `app-flatpak-<id>-` scope. Those keep writing to the app's data
+/// while it's removed, which makes `snap remove` fail ("directory not empty").
+pub fn belongs_to(source: &Source, exe: &str, cgroup: &str) -> bool {
+    match source {
+        Source::Snap { name } => {
+            exe.starts_with(&format!("/snap/{name}/")) || cgroup.contains(&format!("/snap.{name}."))
         }
-        assert_eq!(snap_name("/snap/a;b/1/x"), None);
-        assert!(parse_flatpak_info("[Application]\nname=com.x;rm\n").is_none());
-        assert_eq!(
-            command(&Source::Deb { package: "geany".into() }).unwrap(),
-            [
-                "pkexec",
-                "/usr/bin/env",
-                "DEBIAN_FRONTEND=noninteractive",
-                "/usr/bin/apt-get",
-                "remove",
-                "-y",
-                "geany"
-            ]
-        );
-        assert_eq!(
-            command(&Source::Flatpak { id: "org.x.Y".into(), user: true }).unwrap(),
-            ["/usr/bin/flatpak", "uninstall", "--noninteractive", "-y", "--user", "org.x.Y"]
-        );
-        assert_eq!(command(&Source::Toolbox), None);
-        assert_eq!(describe(&Source::Snap { name: "spotify".into() }), "Snap package spotify");
-        assert_eq!(
-            describe(&Source::Deb { package: "geany".into() }),
-            "Debian package geany (apt)"
-        );
-        assert!(needs_password(&Source::Snap { name: "x".into() }));
-        assert!(!needs_password(&Source::AppImage { path: "/x".into() }));
+        Source::Flatpak { id, .. } => cgroup.contains(&format!("/app-flatpak-{id}-")),
+        _ => false,
     }
+}
 
-    #[test]
-    fn finds_appimage_menu_entries() {
-        let entry = "[Desktop Entry]\nName=Obsidian\nExec=/home/me/Apps/Obsidian.AppImage %U\n";
-        assert!(launches_appimage(entry, "/home/me/Apps/Obsidian.AppImage"));
-        assert!(launches_appimage(
-            "Exec=\"/home/me/My Apps/O.AppImage\" %U\n",
-            "/home/me/My Apps/O.AppImage"
-        ));
-        assert!(!launches_appimage(entry, "/home/me/Apps/Obs"));
+/// The snap's data folder `snap remove` couldn't delete because it wasn't empty, from its
+/// error message: only exactly `<home>/snap/<name>`.
+pub fn snap_leftover(error: &str, name: &str, home: &str) -> Option<String> {
+    let dir = format!("{}/snap/{name}", home.trim_end_matches('/'));
+    error.contains(&format!("remove {dir}: directory not empty")).then_some(dir)
+}
+
+/// "snap remove", "apt-get remove"…: the tool behind `pkexec` / `env`, for messages.
+pub fn tool_name(cmd: &[String]) -> String {
+    let mut args = cmd
+        .iter()
+        .map(|a| a.rsplit('/').next().unwrap_or(a))
+        .skip_while(|a| *a == "pkexec" || *a == "env" || a.contains('='));
+    match (args.next(), args.next()) {
+        (Some(tool), Some(sub)) if !sub.starts_with('-') && !sub.contains('.') => {
+            format!("{tool} {sub}")
+        }
+        (Some(tool), _) => tool.to_owned(),
+        _ => "the command".into(),
     }
 }
 
@@ -536,12 +455,28 @@ mod linux {
             .collect()
     }
 
-    /// Closes the app (`targets`: its processes as `(pid, start_ticks)`), politely then
-    /// forcefully after 5 s, and runs the plan's command. Blocks; run it on a thread.
-    pub fn run(plan: &Plan, targets: &[(u32, u64)]) -> Result<String> {
-        let Some(cmd) = plan.command.as_ref().filter(|_| plan.refusal.is_none()) else {
-            bail!("nothing to run");
-        };
+    /// The user's processes that belong to this installation (see [`super::belongs_to`]).
+    fn installation_processes(source: &Source) -> Vec<(u32, u64)> {
+        if !matches!(source, Source::Snap { .. } | Source::Flatpak { .. }) {
+            return Vec::new();
+        }
+        crate::memory::read_procs()
+            .into_iter()
+            .filter(|p| p.uid == crate::memory::current_uid() && p.pid != std::process::id())
+            .filter(|p| {
+                let exe = fs::read_link(format!("/proc/{}/exe", p.pid))
+                    .map(|e| e.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let cgroup =
+                    fs::read_to_string(format!("/proc/{}/cgroup", p.pid)).unwrap_or_default();
+                super::belongs_to(source, &exe, &cgroup)
+            })
+            .map(|p| (p.pid, p.start_ticks))
+            .collect()
+    }
+
+    /// Asks `targets` to quit, waits up to 5 s, then forces what's left.
+    fn close(targets: &[(u32, u64)]) {
         crate::memory::signal(targets, false);
         let deadline = Instant::now() + Duration::from_secs(5);
         let alive = || {
@@ -564,7 +499,50 @@ mod linux {
             crate::memory::signal(&rest, true);
             std::thread::sleep(Duration::from_millis(500));
         }
+    }
 
+    /// Closes the app (`targets`: the clicked row's processes, plus every other process of
+    /// the installation), then runs the plan's command. Blocks; run it on a thread.
+    pub fn run(plan: &Plan, targets: &[(u32, u64)]) -> Result<String> {
+        let Some(cmd) = plan.command.as_ref().filter(|_| plan.refusal.is_none()) else {
+            bail!("nothing to run");
+        };
+        let mut all = targets.to_vec();
+        for t in installation_processes(&plan.source) {
+            if !all.contains(&t) {
+                all.push(t);
+            }
+        }
+        close(&all);
+        execute(plan, cmd)
+    }
+
+    /// After `snap remove` stopped at "directory not empty": closes anything of the snap
+    /// that still runs, moves its data folder (`leftover`, exactly `~/snap/<name>`, which
+    /// `snap remove` deletes anyway) to the Trash, and runs the removal again.
+    pub fn finish_snap_removal(plan: &Plan, leftover: &str) -> Result<String> {
+        let (Source::Snap { name }, Some(cmd)) = (&plan.source, plan.command.as_ref()) else {
+            bail!("not a snap");
+        };
+        let home = dirs::home_dir().map(|h| h.to_string_lossy().into_owned()).unwrap_or_default();
+        if super::snap_leftover(&format!("remove {leftover}: directory not empty"), name, &home)
+            .is_none()
+        {
+            bail!("refusing to move {leftover}: it isn't ~/snap/{name}");
+        }
+        close(&installation_processes(&plan.source));
+        let out =
+            Command::new("/usr/bin/gio").args(["trash", leftover]).stdin(Stdio::null()).output()?;
+        if !out.status.success() {
+            bail!(
+                "couldn't move {leftover} to the Trash: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+        execute(plan, cmd)
+    }
+
+    fn execute(plan: &Plan, cmd: &[String]) -> Result<String> {
         let out = Command::new(&cmd[0]).args(&cmd[1..]).stdin(Stdio::null()).output()?;
         match out.status.code() {
             Some(0) => Ok(format!("Uninstalled ({}).", plan.describe())),
@@ -582,8 +560,159 @@ mod linux {
                 let err = String::from_utf8_lossy(&out.stderr);
                 let last: Vec<&str> =
                     err.lines().filter(|l| !l.trim().is_empty()).rev().take(2).collect();
-                bail!("{} failed: {}", cmd[0], last.into_iter().rev().collect::<Vec<_>>().join(" "))
+                bail!(
+                    "{} failed: {}",
+                    super::tool_name(cmd),
+                    last.into_iter().rev().collect::<Vec<_>>().join(" ")
+                )
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn facts(exe: &str) -> Facts {
+        Facts { exe: Some(exe.into()), ..Facts::default() }
+    }
+
+    #[test]
+    fn detects_install_sources() {
+        assert_eq!(
+            detect(&facts("/snap/spotify/83/usr/share/spotify/spotify")),
+            Source::Snap { name: "spotify".into() }
+        );
+        let flatpak = "[Application]\nname=com.spotify.Client\nruntime=runtime/org.freedesktop.Platform/x86_64/24.08\n\n\
+                       [Instance]\ninstance-id=123\napp-path=/var/lib/flatpak/app/com.spotify.Client/x86_64/stable/abc/files\n";
+        assert_eq!(
+            detect(&Facts { flatpak_info: Some(flatpak.into()), ..facts("/app/bin/spotify") }),
+            Source::Flatpak { id: "com.spotify.Client".into(), user: false }
+        );
+        let user = flatpak.replace("/var/lib/flatpak", "/home/me/.local/share/flatpak");
+        assert_eq!(parse_flatpak_info(&user), Some(("com.spotify.Client".into(), true)));
+        assert_eq!(
+            detect(&Facts {
+                appimage: Some("/home/me/Apps/Obsidian.AppImage".into()),
+                ..facts("/tmp/.mount_ObsXy/obsidian")
+            }),
+            Source::AppImage { path: "/home/me/Apps/Obsidian.AppImage".into() }
+        );
+        assert_eq!(
+            detect(&facts("/home/me/.local/share/JetBrains/Toolbox/apps/intellij-idea/bin/idea")),
+            Source::Toolbox
+        );
+        assert_eq!(
+            detect(&Facts {
+                deb_package: Some("google-chrome-stable".into()),
+                ..facts("/opt/google/chrome/chrome")
+            }),
+            Source::Deb { package: "google-chrome-stable".into() }
+        );
+        assert_eq!(
+            detect(&facts("/opt/someapp/someapp")),
+            Source::Unknown { path: Some("/opt/someapp/someapp".into()) }
+        );
+    }
+
+    #[test]
+    fn parses_tool_output() {
+        assert_eq!(parse_dpkg_search("geany: /usr/bin/geany\n").as_deref(), Some("geany"));
+        assert_eq!(
+            parse_dpkg_search("libfoo1:amd64: /usr/lib/x/libfoo.so.1\n").as_deref(),
+            Some("libfoo1")
+        );
+        assert_eq!(parse_dpkg_search("a, b: /usr/share/doc\n"), None);
+        assert_eq!(parse_dpkg_search("dpkg-query: no path found matching pattern /opt/x\n"), None);
+        let sim =
+            "Reading package lists...\nRemv geany [2.0-1build2]\nRemv geany-common [2.0-1build2]\n";
+        assert_eq!(parse_apt_simulation(sim), ["geany", "geany-common"]);
+    }
+
+    #[test]
+    fn refuses_dangerous_removals() {
+        let s = |v: &[&str]| v.iter().map(|x| (*x).to_owned()).collect::<Vec<_>>();
+        assert_eq!(refusal(&s(&["geany", "geany-common"])), None);
+        assert!(refusal(&s(&["firefox", "cinnamon-core", "mint-meta-cinnamon"])).is_some());
+        assert!(refusal(&s(&["foo", "xserver-xorg-core"])).is_some());
+        assert!(refusal(&[]).is_some());
+        let many: Vec<String> = (0..=MAX_REMOVALS).map(|i| format!("pkg{i}")).collect();
+        assert!(refusal(&many).is_some());
+    }
+
+    #[test]
+    fn validates_names_and_builds_commands() {
+        assert!(valid_package("google-chrome-stable") && valid_package("g++-13"));
+        for bad in ["", "Foo", "-x", "a;rm -rf /", "a b", "../x"] {
+            assert!(!valid_package(bad), "{bad}");
+        }
+        assert_eq!(snap_name("/snap/a;b/1/x"), None);
+        assert!(parse_flatpak_info("[Application]\nname=com.x;rm\n").is_none());
+        assert_eq!(
+            command(&Source::Deb { package: "geany".into() }).unwrap(),
+            [
+                "pkexec",
+                "/usr/bin/env",
+                "DEBIAN_FRONTEND=noninteractive",
+                "/usr/bin/apt-get",
+                "remove",
+                "-y",
+                "geany"
+            ]
+        );
+        assert_eq!(
+            command(&Source::Flatpak { id: "org.x.Y".into(), user: true }).unwrap(),
+            ["/usr/bin/flatpak", "uninstall", "--noninteractive", "-y", "--user", "org.x.Y"]
+        );
+        assert_eq!(command(&Source::Toolbox), None);
+        assert_eq!(describe(&Source::Snap { name: "spotify".into() }), "Snap package spotify");
+        assert_eq!(
+            describe(&Source::Deb { package: "geany".into() }),
+            "Debian package geany (apt)"
+        );
+        assert!(needs_password(&Source::Snap { name: "x".into() }));
+        assert!(!needs_password(&Source::AppImage { path: "/x".into() }));
+    }
+
+    #[test]
+    fn whole_installation_and_snap_leftovers() {
+        let skype = Source::Snap { name: "skype".into() };
+        let scope = "0::/user.slice/user-1000.slice/user@1000.service/app.slice/snap.skype.skype-1a2b.scope\n";
+        assert!(belongs_to(&skype, "/snap/skype/394/usr/share/skypeforlinux/skypeforlinux", ""));
+        assert!(belongs_to(&skype, "/usr/lib/x/crashpad", scope));
+        assert!(!belongs_to(&skype, "/snap/skypeforlinux/1/x", "0::/snap.skypeforlinux.x.scope"));
+        let flat = Source::Flatpak { id: "com.spotify.Client".into(), user: true };
+        assert!(belongs_to(
+            &flat,
+            "/app/x",
+            "0::/user.slice/app.slice/app-flatpak-com.spotify.Client-12345.scope"
+        ));
+        assert!(!belongs_to(&Source::Deb { package: "x".into() }, "/usr/bin/x", scope));
+
+        let err = "error: cannot perform the following tasks: - Remove data for snap \"skype\" (394) \
+                   (failed to remove snap \"skype\" base directory: remove /home/carevski/snap/skype: directory not empty)";
+        assert_eq!(
+            snap_leftover(err, "skype", "/home/carevski").as_deref(),
+            Some("/home/carevski/snap/skype")
+        );
+        assert_eq!(snap_leftover(err, "skype", "/home/someone"), None);
+        assert_eq!(snap_leftover("error: other", "skype", "/home/carevski"), None);
+
+        let argv = |c: Option<Vec<String>>| tool_name(&c.unwrap());
+        assert_eq!(argv(command(&skype)), "snap remove");
+        assert_eq!(argv(command(&Source::Deb { package: "geany".into() })), "apt-get remove");
+        assert_eq!(argv(command(&flat)), "flatpak uninstall");
+    }
+
+    #[test]
+    fn finds_appimage_menu_entries() {
+        let entry = "[Desktop Entry]\nName=Obsidian\nExec=/home/me/Apps/Obsidian.AppImage %U\n";
+        assert!(launches_appimage(entry, "/home/me/Apps/Obsidian.AppImage"));
+        assert!(launches_appimage(
+            "Exec=\"/home/me/My Apps/O.AppImage\" %U\n",
+            "/home/me/My Apps/O.AppImage"
+        ));
+        assert!(!launches_appimage(entry, "/home/me/Apps/Obs"));
     }
 }

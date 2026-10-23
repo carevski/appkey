@@ -147,7 +147,7 @@ On Ubuntu, Linux Mint and other Ubuntu-based systems, the settings window has a 
 
 | Installed as | Removed with |
 |---|---|
-| Snap | `snap remove` (asks for your password) |
+| Snap | `snap remove` (asks for your password). If snap stops because the app's data folder `~/snap/<name>` wasn't empty, appkey offers to move that folder to the Trash and finish |
 | Flatpak (e.g. from Software Manager / Flathub) | `flatpak uninstall` (asks for your password if it was installed for all users) |
 | .deb (apt, Software Manager, a downloaded .deb) | `apt-get remove`, after a dry run that shows every package that would go (asks for your password; your settings are kept) |
 | AppImage | the .AppImage file and its menu entry are moved to the **Trash**, so you can restore them |

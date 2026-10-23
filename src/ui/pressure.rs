@@ -464,6 +464,65 @@ impl Dialog {
         action
     }
 
+    /// The result, and after `snap remove` stopped at "directory not empty", the offer to
+    /// finish (close what still runs of it, move its data folder to the Trash, retry).
+    fn done_dialog(
+        &mut self,
+        ctx: &egui::Context,
+        label: String,
+        plan: uninstall::Plan,
+        result: Result<String, String>,
+    ) -> Option<Uninstall> {
+        // `snap remove` stops when the app's data folder isn't empty (something of it
+        // was still writing there): offer to finish the job.
+        let leftover = match (&plan.source, &result) {
+            (uninstall::Source::Snap { name }, Err(e)) => {
+                uninstall::snap_leftover(e, name, &self.home)
+            }
+            _ => None,
+        };
+        let (mut ok, mut finish) = (false, false);
+        modal(ctx, |ui| {
+            ui.heading(label.as_str());
+            match &result {
+                Ok(msg) => ui.label(msg.as_str()),
+                Err(e) => ui.label(
+                    RichText::new(format!("Not uninstalled: {e}"))
+                        .color(ui.visuals().error_fg_color),
+                ),
+            };
+            if let Some(dir) = &leftover {
+                ui.add_space(6.0);
+                ui.label(format!(
+                    "snap stopped at the last step: it couldn't delete {label}'s data \
+                     folder {dir}, because something was still writing to it. The app \
+                     is already gone from your menu. appkey can close anything of it \
+                     that still runs, move that folder to the Trash (snap deletes it \
+                     anyway; this way you can still restore it) and finish."
+                ));
+            }
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                if let Some(dir) = &leftover {
+                    let short = procs::short_path(dir, &self.home);
+                    finish = ui.button(format!("Move {short} to the Trash and finish")).clicked();
+                }
+                ok = ui.button(if leftover.is_some() { "Not now" } else { "OK" }).clicked();
+            });
+        });
+        if finish && let Some(dir) = leftover {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let job = plan.clone();
+            std::thread::spawn(move || {
+                let _ = tx
+                    .send(uninstall::finish_snap_removal(&job, &dir).map_err(|e| format!("{e:#}")));
+            });
+            Some(Uninstall::Running { label, plan, rx })
+        } else {
+            (!ok).then_some(Uninstall::Done { label, plan, result })
+        }
+    }
+
     /// The "Uninstall…" dialog: checking → confirm (or why not) → running → result.
     fn uninstall_dialog(&mut self, ctx: &egui::Context) {
         let Some(state) = self.uninstall.take() else { return };
@@ -496,21 +555,21 @@ impl Dialog {
                             .unwrap_or_default();
                         let targets = self.targets(&members);
                         let (tx, rx) = std::sync::mpsc::channel();
+                        let job = plan.clone();
                         std::thread::spawn(move || {
-                            let _ = tx.send(
-                                uninstall::run(&plan, &targets).map_err(|e| format!("{e:#}")),
-                            );
+                            let _ = tx
+                                .send(uninstall::run(&job, &targets).map_err(|e| format!("{e:#}")));
                         });
-                        Some(Uninstall::Running { label, rx })
+                        Some(Uninstall::Running { label, plan, rx })
                     }
                     Some(false) => None,
                     None => Some(Uninstall::Confirm { root, label, plan }),
                 }
             }
-            Uninstall::Running { label, rx } => match rx.try_recv() {
+            Uninstall::Running { label, plan, rx } => match rx.try_recv() {
                 Ok(result) => {
                     self.refresh();
-                    Some(Uninstall::Done { label, result })
+                    Some(Uninstall::Done { label, plan, result })
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => {
                     modal(ctx, |ui| {
@@ -521,26 +580,11 @@ impl Dialog {
                         });
                     });
                     ctx.request_repaint_after(Duration::from_millis(100));
-                    Some(Uninstall::Running { label, rx })
+                    Some(Uninstall::Running { label, plan, rx })
                 }
                 Err(_) => None,
             },
-            Uninstall::Done { label, result } => {
-                let mut ok = false;
-                modal(ctx, |ui| {
-                    ui.heading(label.as_str());
-                    match &result {
-                        Ok(msg) => ui.label(msg.as_str()),
-                        Err(e) => ui.label(
-                            RichText::new(format!("Not uninstalled: {e}"))
-                                .color(ui.visuals().error_fg_color),
-                        ),
-                    };
-                    ui.add_space(6.0);
-                    ok = ui.button("OK").clicked();
-                });
-                (!ok).then_some(Uninstall::Done { label, result })
-            }
+            Uninstall::Done { label, plan, result } => self.done_dialog(ctx, label, plan, result),
         };
         self.uninstall = next;
     }
@@ -817,8 +861,16 @@ fn confirm(ui: &mut egui::Ui, label: &str, plan: &uninstall::Plan, n: usize) -> 
         ui.label(RichText::new(format!("  {item}")).monospace());
     }
     ui.add_space(6.0);
+    let whole = if matches!(
+        plan.source,
+        uninstall::Source::Snap { .. } | uninstall::Source::Flatpak { .. }
+    ) {
+        ", and anything else of it still running"
+    } else {
+        ""
+    };
     ui.label(format!(
-        "appkey first closes {label} ({n} process{}), then runs:",
+        "appkey first closes {label} ({n} process{}{whole}), then runs:",
         if n == 1 { "" } else { "es" }
     ));
     let cmd = plan.command.as_ref().map(|c| c.join(" ")).unwrap_or_default();
@@ -845,10 +897,26 @@ fn confirm(ui: &mut egui::Ui, label: &str, plan: &uninstall::Plan, n: usize) -> 
 
 /// Where "Uninstall…" is.
 enum Uninstall {
-    Checking { root: u32, label: String, rx: std::sync::mpsc::Receiver<uninstall::Plan> },
-    Confirm { root: u32, label: String, plan: uninstall::Plan },
-    Running { label: String, rx: std::sync::mpsc::Receiver<Result<String, String>> },
-    Done { label: String, result: Result<String, String> },
+    Checking {
+        root: u32,
+        label: String,
+        rx: std::sync::mpsc::Receiver<uninstall::Plan>,
+    },
+    Confirm {
+        root: u32,
+        label: String,
+        plan: uninstall::Plan,
+    },
+    Running {
+        label: String,
+        plan: uninstall::Plan,
+        rx: std::sync::mpsc::Receiver<Result<String, String>>,
+    },
+    Done {
+        label: String,
+        plan: uninstall::Plan,
+        result: Result<String, String>,
+    },
 }
 
 impl std::fmt::Debug for Uninstall {
