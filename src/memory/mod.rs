@@ -10,6 +10,7 @@
 
 pub mod procs;
 pub mod sysrq;
+pub mod uninstall;
 
 use std::collections::{HashMap, VecDeque};
 use std::fmt::Write as _;

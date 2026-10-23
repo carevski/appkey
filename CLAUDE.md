@@ -29,7 +29,7 @@ Every push to `main` runs `.github/workflows/release.yml`: CI → installers on 
 - `src/matcher.rs`: how a configured `app` name is compared to what the OS reports
 - `src/platform/{macos,windows}.rs`, `src/platform/linux/`: one backend per OS, **same public functions in each** (listed in `platform/mod.rs`). `desktop_entry.rs` / `lnk.rs` are pure parsers compiled for tests on every host.
 - `src/platform/linux/`: `mod.rs` picks a backend per session/desktop. `x11.rs`, `gnome.rs` (+ `packaging/gnome-extension/`), `kde.rs`, `hyprland.rs` implement `WindowSystem`. `cinnamon.rs` = Super shortcuts as Cinnamon custom keybindings (X11 windows otherwise). `reserved.rs` = combos Cinnamon/GNOME use themselves (read from GSettings; flagged in settings, reported unavailable by the daemon). `portal.rs` = GlobalShortcuts portal, `xkb.rs` = key syntax conversions. See the table in docs/DESIGN.md.
-- `src/memory/`: Ubuntu/Mint only: low-memory detection (`/proc/meminfo`, PSI), busy-background-CPU tracking, signalling the user's processes, Magic SysRq (`sysrq.rs`). `procs.rs` = process tree → apps, labels (Chrome tabs, IntelliJ, Claude Code…), "left running" detection. Parsers compile on every host for tests. UI: `ui/memory.rs` (settings tab), `ui/pressure.rs` (`appkey memory [--alert]` window)
+- `src/memory/`: Ubuntu/Mint only: low-memory detection (`/proc/meminfo`, PSI), busy-background-CPU tracking, signalling the user's processes, Magic SysRq (`sysrq.rs`). `procs.rs` = process tree → apps, labels (Chrome tabs, IntelliJ, Claude Code…), "left running" detection. `uninstall.rs` = how an app was installed (snap, Flatpak, .deb, AppImage) and removing it. Parsers compile on every host for tests. UI: `ui/memory.rs` (settings tab), `ui/pressure.rs` (`appkey memory [--alert]` window)
 - `src/hotkeys.rs`: `Hotkeys` trait; global-hotkey on macOS/Windows/X11, desktop-specific ones on Wayland
 
 ## Rules
@@ -41,7 +41,7 @@ Every push to `main` runs `.github/workflows/release.yml`: CI → installers on 
   - Launch commands run without a shell (argv list only).
   - The config is refused if other users can write to it.
   - Never bypass OS protections: no focus-stealing hacks, no `SendInput` tricks, no elevation, no injecting into other processes. If the OS needs the user to grant something, detect it, explain it, and let the OS show its own prompt.
-  - The one thing that needs root (the SysRq setting, Memory tab) runs fixed argvs through `pkexec`, so the desktop shows its own password prompt. appkey's own binary never runs as root.
+  - What needs root (the SysRq setting; uninstalling a snap or .deb from the memory window) runs fixed argvs through `pkexec`, so the desktop shows its own password prompt. appkey's own binary never runs as root. apt removals are dry-run first and refused when they'd remove desktop/system packages.
   - Every `unsafe` block needs a `// SAFETY:` comment.
 - Errors: `anyhow` with context that tells the user what to do. Hotkey failures go to the tray status/tooltip, not just stderr. In a tray app nobody sees stderr.
 - Keep `README.md` (user-facing) and `docs/DESIGN.md` (decisions, platform matrix) in sync with behaviour changes.

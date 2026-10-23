@@ -143,6 +143,19 @@ On Ubuntu, Linux Mint and other Ubuntu-based systems, the settings window has a 
 - **Show** brings an app's window to the front, so you can check before closing. **Close** asks a whole app to quit; **End** stops one process (for a Chrome tab: that tab shows "Aw, Snap!" and can be reloaded; which tab is which is only visible in Chrome's own Task Manager, <kbd>Shift</kbd>+<kbd>Esc</kbd>). If something doesn't quit within 5 seconds, **Force quit** appears.
 - The list holds still while the mouse pointer is in the window, so a click always hits what you aimed at.
 
+**Uninstall an app you no longer need**, without remembering how you installed it: click **Uninstall…** on its row. appkey works out how it was installed and removes it the matching way:
+
+| Installed as | Removed with |
+|---|---|
+| Snap | `snap remove` (asks for your password) |
+| Flatpak (e.g. from Software Manager / Flathub) | `flatpak uninstall` (asks for your password if it was installed for all users) |
+| .deb (apt, Software Manager, a downloaded .deb) | `apt-get remove`, after a dry run that shows every package that would go (asks for your password; your settings are kept) |
+| AppImage | the .AppImage file and its menu entry are moved to the **Trash**, so you can restore them |
+| JetBrains Toolbox IDE | not automatic: appkey tells you to remove it in Toolbox |
+| anything else | appkey says it can't tell and shows where the program is |
+
+You always see what will be removed and the exact command first. appkey closes the app, then removes it. It refuses when an apt removal would take part of the desktop or the system with it (for example removing Nemo would also remove Cinnamon), or more than 15 packages: do those in your package manager if you're sure.
+
 Open it with **Show memory use now…**, `appkey memory`, or **its own shortcut**: in Shortcuts, add one and choose app → *appkey* → **Memory window**. appkey only offers your own programs, never parts of the desktop itself.
 
 **Low-memory warning.** Tick *Warn me before the computer runs out of memory* and click **Save**. When free memory stays below the limit you set (10% by default), or programs keep waiting on memory (20% of the time by default), the memory window opens by itself. **Snooze for an hour** keeps the warning away for an hour; **Dismiss** for 5 minutes.
@@ -193,7 +206,7 @@ On Windows, tick **Add appkey to PATH** in the installer to use these from a ter
 
 - appkey needs **no special permissions** on any system. It doesn't read your keystrokes: it asks the system to tell it when *your* shortcuts are pressed.
 - It never runs commands through a shell. `launch` starts exactly the program you list.
-- **Linux:** the low-memory window can only close your own programs, and it never runs as administrator. Changing the SysRq setting is the one thing that needs administrator rights: your system's own password prompt asks for it, and only for writing that one setting.
+- **Linux:** the memory window can only close your own programs, and it never runs as administrator. Changing the SysRq setting and uninstalling a snap or .deb are the only things that need administrator rights: your system's own password prompt asks for it, and only for writing that one setting.
 - Your config decides which programs run, so on macOS and Linux appkey refuses to use it if other users on the computer could edit it.
 - **Windows:** an app running *as administrator* can only be brought to the front if appkey also runs as administrator. appkey tells you when this happens rather than working around Windows' protection.
 

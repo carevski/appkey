@@ -16,7 +16,7 @@ use eframe::egui::{self, Button, RichText};
 
 use crate::config::{self, MemoryWatch};
 use crate::memory::procs::{self, AppGroup, Proc};
-use crate::memory::{self, Snapshot, sysrq};
+use crate::memory::{self, Snapshot, sysrq, uninstall};
 use crate::platform;
 
 const REFRESH: Duration = Duration::from_secs(2);
@@ -92,6 +92,8 @@ enum Action {
     End(u32),
     ForceProc(u32),
     Show(u32),
+    /// Start "Uninstall…" for the app with this root.
+    Uninstall(u32),
 }
 
 #[derive(Debug)]
@@ -128,6 +130,7 @@ struct Dialog {
     closing_procs: HashMap<u32, Instant>,
     status: Option<String>,
     sysrq_f: bool,
+    uninstall: Option<Uninstall>,
     #[cfg(debug_assertions)]
     devshot: Option<super::devshot::DevShot>,
 }
@@ -166,6 +169,7 @@ impl Dialog {
             closing_procs: HashMap::new(),
             status: None,
             sysrq_f: sysrq::read_current().is_ok_and(|v| sysrq::allows(v, sysrq::SIGNAL)),
+            uninstall: None,
             #[cfg(debug_assertions)]
             devshot: super::devshot::DevShot::from_env(),
         };
@@ -261,8 +265,8 @@ impl Dialog {
 
     fn apply(&mut self, action: Action) {
         let now = Instant::now();
-        // Showing a window changes nothing we list.
-        let reread = !matches!(action, Action::Show(_));
+        // Showing a window or starting "Uninstall…" changes nothing we list (yet).
+        let reread = !matches!(action, Action::Show(_) | Action::Uninstall(_));
         let find = |root: u32| self.all_groups().find(|g| g.root == root).cloned();
         match action {
             Action::Close(roots) => {
@@ -295,6 +299,15 @@ impl Dialog {
             Action::Show(pid) => {
                 if !matches!(platform::focus_pid(pid), Ok(true)) {
                     self.status = Some("Couldn't bring that window to the front.".into());
+                }
+            }
+            Action::Uninstall(root) => {
+                if let Some(g) = find(root) {
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    std::thread::spawn(move || {
+                        let _ = tx.send(uninstall::plan(root));
+                    });
+                    self.uninstall = Some(Uninstall::Checking { root, label: g.label, rx });
                 }
             }
         }
@@ -435,9 +448,101 @@ impl Dialog {
                     }
                 }
             }
+            // Leftovers in the background are rarely installed apps; offer it for the rest.
+            if !g.detached
+                && ui
+                    .small_button("Uninstall…")
+                    .on_hover_text(
+                        "Find out how it was installed and remove it (you confirm first)",
+                    )
+                    .clicked()
+            {
+                action = Some(Action::Uninstall(g.root));
+            }
         });
         ui.end_row();
         action
+    }
+
+    /// The "Uninstall…" dialog: checking → confirm (or why not) → running → result.
+    fn uninstall_dialog(&mut self, ctx: &egui::Context) {
+        let Some(state) = self.uninstall.take() else { return };
+        let next = match state {
+            Uninstall::Checking { root, label, rx } => match rx.try_recv() {
+                Ok(plan) => Some(Uninstall::Confirm { root, label, plan }),
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    modal(ctx, |ui| {
+                        ui.heading(format!("Uninstall {label}"));
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.label("Finding out how it was installed…");
+                        });
+                    });
+                    ctx.request_repaint_after(Duration::from_millis(100));
+                    Some(Uninstall::Checking { root, label, rx })
+                }
+                Err(_) => None,
+            },
+            Uninstall::Confirm { root, label, plan } => {
+                let n = self.all_groups().find(|g| g.root == root).map_or(0, |g| g.members.len());
+                let mut choice = None;
+                modal(ctx, |ui| choice = confirm(ui, &label, &plan, n));
+                match choice {
+                    Some(true) => {
+                        let members = self
+                            .all_groups()
+                            .find(|g| g.root == root)
+                            .map(|g| g.members.clone())
+                            .unwrap_or_default();
+                        let targets = self.targets(&members);
+                        let (tx, rx) = std::sync::mpsc::channel();
+                        std::thread::spawn(move || {
+                            let _ = tx.send(
+                                uninstall::run(&plan, &targets).map_err(|e| format!("{e:#}")),
+                            );
+                        });
+                        Some(Uninstall::Running { label, rx })
+                    }
+                    Some(false) => None,
+                    None => Some(Uninstall::Confirm { root, label, plan }),
+                }
+            }
+            Uninstall::Running { label, rx } => match rx.try_recv() {
+                Ok(result) => {
+                    self.refresh();
+                    Some(Uninstall::Done { label, result })
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    modal(ctx, |ui| {
+                        ui.heading(format!("Uninstalling {label}"));
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.label("Closing it, then removing it. Approve the password prompt if one appears.");
+                        });
+                    });
+                    ctx.request_repaint_after(Duration::from_millis(100));
+                    Some(Uninstall::Running { label, rx })
+                }
+                Err(_) => None,
+            },
+            Uninstall::Done { label, result } => {
+                let mut ok = false;
+                modal(ctx, |ui| {
+                    ui.heading(label.as_str());
+                    match &result {
+                        Ok(msg) => ui.label(msg.as_str()),
+                        Err(e) => ui.label(
+                            RichText::new(format!("Not uninstalled: {e}"))
+                                .color(ui.visuals().error_fg_color),
+                        ),
+                    };
+                    ui.add_space(6.0);
+                    ok = ui.button("OK").clicked();
+                });
+                (!ok).then_some(Uninstall::Done { label, result })
+            }
+        };
+        self.uninstall = next;
     }
 
     fn member_rows(&mut self, ui: &mut egui::Ui, g: &AppGroup) -> Option<Action> {
@@ -682,8 +787,84 @@ impl eframe::App for Dialog {
                 }
             });
         });
-        if let Some(a) = action {
+        self.uninstall_dialog(&ctx);
+        if let Some(a) = action.filter(|_| self.uninstall.is_none()) {
             self.apply(a);
         }
     }
+}
+
+/// The confirmation (or why not): `Some(true)` to go ahead, `Some(false)` to close.
+fn confirm(ui: &mut egui::Ui, label: &str, plan: &uninstall::Plan, n: usize) -> Option<bool> {
+    let mut choice = None;
+    ui.heading(format!("Uninstall {label}?"));
+    ui.label(format!("Installed as: {}", plan.describe()));
+    ui.add_space(6.0);
+    if let Some(why) = &plan.refusal {
+        ui.label(
+            RichText::new(format!("appkey won't uninstall it: {why}"))
+                .color(ui.visuals().warn_fg_color),
+        );
+        ui.add_space(6.0);
+        return ui.button("OK").clicked().then_some(false);
+    }
+    ui.label(if matches!(plan.source, uninstall::Source::AppImage { .. }) {
+        "Moves to the Trash (you can restore it from there):"
+    } else {
+        "Removes:"
+    });
+    for item in plan.removes.iter().take(16) {
+        ui.label(RichText::new(format!("  {item}")).monospace());
+    }
+    ui.add_space(6.0);
+    ui.label(format!(
+        "appkey first closes {label} ({n} process{}), then runs:",
+        if n == 1 { "" } else { "es" }
+    ));
+    let cmd = plan.command.as_ref().map(|c| c.join(" ")).unwrap_or_default();
+    ui.label(RichText::new(cmd).monospace().small());
+    if uninstall::needs_password(&plan.source) {
+        ui.label(RichText::new("Your system will ask for your password.").weak());
+    }
+    if matches!(plan.source, uninstall::Source::Deb { .. }) {
+        ui.label(RichText::new("Your settings for it are kept (apt remove, not purge).").weak());
+    }
+    ui.add_space(8.0);
+    ui.horizontal(|ui| {
+        let go = egui::Button::new(RichText::new("Uninstall").color(egui::Color32::WHITE))
+            .fill(ui.visuals().error_fg_color);
+        if ui.add(go).clicked() {
+            choice = Some(true);
+        }
+        if ui.button("Cancel").clicked() {
+            choice = Some(false);
+        }
+    });
+    choice
+}
+
+/// Where "Uninstall…" is.
+enum Uninstall {
+    Checking { root: u32, label: String, rx: std::sync::mpsc::Receiver<uninstall::Plan> },
+    Confirm { root: u32, label: String, plan: uninstall::Plan },
+    Running { label: String, rx: std::sync::mpsc::Receiver<Result<String, String>> },
+    Done { label: String, result: Result<String, String> },
+}
+
+impl std::fmt::Debug for Uninstall {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Checking { .. } => "Checking",
+            Self::Confirm { .. } => "Confirm",
+            Self::Running { .. } => "Running",
+            Self::Done { .. } => "Done",
+        })
+    }
+}
+
+fn modal(ctx: &egui::Context, body: impl FnOnce(&mut egui::Ui)) {
+    egui::Modal::new(egui::Id::new("uninstall")).show(ctx, |ui| {
+        ui.set_max_width(520.0);
+        body(ui);
+    });
 }
