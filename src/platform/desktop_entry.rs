@@ -62,8 +62,13 @@ pub fn parse(text: &str, id: &str) -> Option<DesktopApp> {
         _ if matches!(program_name, "env" | "flatpak" | "sh" | "bash") => id.to_owned(),
         _ => program_name.to_owned(),
     };
+    // A browser web app (Chrome/Edge PWA) runs the browser itself: its program
+    // name would make it match every browser window, and the browser match it.
+    let web_app = launch.iter().any(|a| a.starts_with("--app-id=") || a.starts_with("--app="));
+    let names: &[&str] =
+        if web_app { &[app.as_str(), id] } else { &[app.as_str(), id, program_name] };
     let mut ids: Vec<String> = Vec::new();
-    for candidate in [app.as_str(), id, program_name] {
+    for &candidate in names {
         if !ids.iter().any(|i| i == candidate) {
             ids.push(candidate.to_owned());
         }
@@ -193,6 +198,13 @@ mod tests {
 
         let code = "[Desktop Entry]\nType=Application\nName=Code\nExec=/usr/share/code/code %F\nStartupWMClass=Code\n";
         assert_eq!(parse(code, "code").unwrap().app, "Code");
+
+        let pwa = "[Desktop Entry]\nType=Application\nName=Outlook\n\
+                   Exec=/opt/google/chrome/google-chrome --profile-directory=Default --app-id=faoln\n\
+                   StartupWMClass=crx_faoln\n";
+        let a = parse(pwa, "chrome-faoln-Default").unwrap();
+        assert_eq!(a.app, "crx_faoln");
+        assert_eq!(a.ids, ["crx_faoln", "chrome-faoln-Default"]);
 
         let flatpak = "[Desktop Entry]\nType=Application\nName=GIMP\nExec=/usr/bin/flatpak run org.gimp.GIMP @@ %f @@\n";
         assert_eq!(parse(flatpak, "org.gimp.GIMP").unwrap().app, "org.gimp.GIMP");

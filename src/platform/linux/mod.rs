@@ -174,15 +174,24 @@ fn aliases(app: &str, installed: &[DesktopApp]) -> Vec<String> {
     out
 }
 
+/// The names a window answers to. A Chrome/Edge web app window is `crx_<id>`
+/// with the browser's class (`Google-chrome`), and must not count as the browser.
+fn window_ids(w: &Win) -> &[String] {
+    match w.ids.first() {
+        Some(instance) if instance.starts_with("crx_") => &w.ids[..1],
+        _ => &w.ids,
+    }
+}
+
 fn window_matches(w: &Win, aliases: &[String]) -> bool {
-    w.ids.iter().any(|id| aliases.iter().any(|a| matches(a, id)))
+    window_ids(w).iter().any(|id| aliases.iter().any(|a| matches(a, id)))
 }
 
 /// The window's app, named after its installed `.desktop` entry when one matches.
 fn app_info(w: &Win, installed: &[DesktopApp]) -> Option<AppInfo> {
-    let known =
-        installed.iter().find(|d| d.ids.iter().any(|i| w.ids.iter().any(|c| matches(i, c))));
-    match (known, w.ids.first()) {
+    let ids = window_ids(w);
+    let known = installed.iter().find(|d| d.ids.iter().any(|i| ids.iter().any(|c| matches(i, c))));
+    match (known, ids.first()) {
         (Some(d), _) => Some(d.info.clone()),
         (None, Some(id)) => Some(AppInfo { name: id.clone(), app: id.clone(), launch: None }),
         (None, None) => None,
@@ -332,5 +341,20 @@ mod tests {
         assert_eq!(app_info(&win(&["code", "Code"]), &installed).unwrap().app, "code");
         assert_eq!(app_info(&win(&["xterm", "XTerm"]), &installed).unwrap().app, "xterm");
         assert!(app_info(&win(&[]), &installed).is_none());
+    }
+
+    #[test]
+    fn web_apps_are_not_the_browser() {
+        let installed = [
+            desktop_app("google-chrome", &["google-chrome"]),
+            desktop_app("crx_abc", &["crx_abc", "chrome-abc-Default"]),
+        ];
+        let (chrome, pwa) =
+            (win(&["google-chrome", "Google-chrome"]), win(&["crx_abc", "Google-chrome"]));
+        let outlook = aliases("crx_abc", &installed);
+        assert!(window_matches(&pwa, &outlook));
+        assert!(!window_matches(&chrome, &outlook));
+        assert!(!window_matches(&pwa, &aliases("google-chrome", &installed)));
+        assert_eq!(app_info(&pwa, &installed).unwrap().app, "crx_abc");
     }
 }
