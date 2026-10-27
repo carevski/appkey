@@ -14,10 +14,21 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Document {
+    /// Light or dark windows; `None` follows the system.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub theme: Option<Theme>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory_watch: Option<MemoryWatch>,
     #[serde(default, rename = "shortcut")]
     pub shortcuts: Vec<Entry>,
+}
+
+/// `theme = "light" | "dark"` for appkey's own windows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Theme {
+    Light,
+    Dark,
 }
 
 /// `[memory_watch]`: warn before the system runs out of memory (Ubuntu / Linux Mint only;
@@ -388,12 +399,13 @@ mod tests {
             },
         ];
         let doc = Document {
+            theme: Some(Theme::Light),
             shortcuts: entries,
             memory_watch: Some(MemoryWatch { enabled: true, ..MemoryWatch::default() }),
         };
         save_document(&path, &doc).unwrap();
         assert_eq!(read_document(&path).unwrap(), doc);
-        let one = Document { shortcuts: doc.shortcuts[..1].to_vec(), memory_watch: None };
+        let one = Document { shortcuts: doc.shortcuts[..1].to_vec(), ..Document::default() };
         save_document(&path, &one).unwrap(); // overwrite works
         assert_eq!(read_document(&path).unwrap(), one);
         fs::remove_dir_all(&dir).unwrap();

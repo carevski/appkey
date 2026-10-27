@@ -9,6 +9,7 @@
 //! - `desktop_shortcuts() -> Vec<(u32, String)>`: combos the desktop itself uses (`HotKey` id, why)
 //! - `window_titles() -> HashMap<u32, Vec<String>>`: window titles by pid (Linux memory window)
 //! - `logo_key_down() -> bool`: Super/Win held, where the desktop hides its key events (X11)
+//! - `dark_mode() -> Option<bool>`: the desktop's theme, where winit can't tell (Linux)
 //! - `diagnostics() -> Vec<String>`: environment/permission notes for `appkey check`
 //! - `hotkeys(sink) -> Result<Box<dyn Hotkeys>>`: the shortcut mechanism for this desktop
 //! - `ensure_supported() -> Result<()>`: fail early in environments we can't drive

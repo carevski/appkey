@@ -78,6 +78,7 @@ pub fn run(mode: Mode) -> Result<bool> {
         options,
         Box::new(move |cc| {
             super::font::install(&cc.egui_ctx)?;
+            super::theme::apply(&cc.egui_ctx, super::theme::saved());
             Ok(Box::new(Dialog::new(mode, flag)))
         }),
     )

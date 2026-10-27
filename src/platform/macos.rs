@@ -158,6 +158,11 @@ pub fn logo_key_down() -> bool {
     false
 }
 
+/// The system theme reaches egui through winit here, so there's nothing to add.
+pub fn dark_mode() -> Option<bool> {
+    None
+}
+
 /// Window titles per pid; only the Linux memory window uses them.
 #[allow(dead_code)] // same API on every platform
 pub fn window_titles() -> std::collections::HashMap<u32, Vec<String>> {

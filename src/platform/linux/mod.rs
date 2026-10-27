@@ -258,6 +258,42 @@ pub fn logo_key_down() -> bool {
     session() == Session::X11 && x11::logo_key_down()
 }
 
+/// Whether the desktop uses a dark theme, for appkey's own windows (winit can't tell
+/// on X11). `None` when it can't be read.
+pub fn dark_mode() -> Option<bool> {
+    if desktop_is(&["KDE"]) {
+        let path = dirs::config_dir()?.join("kdeglobals");
+        return Some(kde_dark(&std::fs::read_to_string(path).unwrap_or_default()));
+    }
+    let read = |schema: &str, key: &str| reserved::gsettings(&["get", schema, key]).ok();
+    let scheme = read("org.gnome.desktop.interface", "color-scheme")
+        .filter(|s| s.contains("prefer-"))
+        .or_else(|| read("org.x.apps.portal", "color-scheme"));
+    let gtk_schema = if is_cinnamon() {
+        "org.cinnamon.desktop.interface"
+    } else {
+        "org.gnome.desktop.interface"
+    };
+    gtk_dark(scheme.as_deref(), read(gtk_schema, "gtk-theme").as_deref())
+}
+
+/// An explicit `color-scheme` preference wins, else a theme named "…Dark…".
+fn gtk_dark(color_scheme: Option<&str>, gtk_theme: Option<&str>) -> Option<bool> {
+    match color_scheme {
+        Some(s) if s.contains("prefer-dark") => Some(true),
+        Some(s) if s.contains("prefer-light") => Some(false),
+        _ => gtk_theme.map(|t| t.to_lowercase().contains("dark")),
+    }
+}
+
+/// `kdeglobals` `[General] ColorScheme=BreezeDark`; Breeze (light) when unset.
+fn kde_dark(kdeglobals: &str) -> bool {
+    kdeglobals
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("ColorScheme="))
+        .is_some_and(|v| v.to_lowercase().contains("dark"))
+}
+
 /// Titles of each process's windows, for the memory window. Errors leave it empty:
 /// the window still works, it just can't name windows.
 pub fn window_titles() -> std::collections::HashMap<u32, Vec<String>> {
@@ -341,6 +377,18 @@ mod tests {
         assert_eq!(app_info(&win(&["code", "Code"]), &installed).unwrap().app, "code");
         assert_eq!(app_info(&win(&["xterm", "XTerm"]), &installed).unwrap().app, "xterm");
         assert!(app_info(&win(&[]), &installed).is_none());
+    }
+
+    #[test]
+    fn dark_mode_detection() {
+        assert_eq!(gtk_dark(Some("'prefer-dark'"), Some("'Mint-Y-Aqua'")), Some(true));
+        assert_eq!(gtk_dark(Some("'prefer-light'"), Some("'Adwaita-dark'")), Some(false));
+        assert_eq!(gtk_dark(Some("'default'"), Some("'Mint-Y-Dark-Aqua'")), Some(true));
+        assert_eq!(gtk_dark(None, Some("'Mint-Y-Aqua'")), Some(false));
+        assert_eq!(gtk_dark(None, None), None);
+        assert!(kde_dark("[General]\nColorScheme=BreezeDark\n"));
+        assert!(!kde_dark("[General]\nColorScheme=BreezeClassic\n"));
+        assert!(!kde_dark(""));
     }
 
     #[test]

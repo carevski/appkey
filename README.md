@@ -66,6 +66,8 @@ Not sure which one you're using? Run `echo $XDG_SESSION_TYPE $XDG_CURRENT_DESKTO
 
 Click the appkey icon in the tray / menu bar and choose **Settings…**. The settings window also opens by itself the first time you start appkey.
 
+appkey's windows follow your system's light or dark theme. To choose one yourself, click **Light** or **Dark** at the top right of the settings window (**System** goes back to following the system). The choice is saved straight away.
+
 1. Click **+ Add shortcut**, then **press the keys** you want, for example <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>T</kbd>. (Esc cancels.)
 2. Click **Choose app…** and pick the application:
    - **Open now**: apps that are running at the moment
@@ -102,6 +104,8 @@ os = ["linux"]
 | `name` | no | A friendly name for the settings window. |
 | `launch` | no | How to start the app if it isn't open: `["program", "argument", …]`. If you leave it out, appkey uses `app`. |
 | `os` | no | Only use this shortcut on some systems, e.g. `["linux"]`. Shortcuts made in the settings window are limited to the system you made them on, so one config can be shared between computers. |
+
+The top of the file may also have `theme = "light"` or `theme = "dark"`, the colours of appkey's own windows. Leave it out to follow the system.
 
 Saving from the settings window rewrites the file, so any comments you added by hand are lost.
 

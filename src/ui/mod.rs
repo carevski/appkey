@@ -11,13 +11,14 @@ mod memory;
 mod picker;
 #[cfg(target_os = "linux")]
 mod pressure;
+mod theme;
 
 use std::path::PathBuf;
 
 use anyhow::{Result, anyhow};
 use eframe::egui::{self, Button, Color32, RichText};
 
-use crate::config::{self, Document, Entry, MemoryWatch};
+use crate::config::{self, Document, Entry, MemoryWatch, Theme};
 use crate::platform::{self, AppInfo};
 use keys::Recorded;
 use picker::Picker;
@@ -36,7 +37,9 @@ pub fn run(config_path: PathBuf) -> Result<()> {
         options,
         Box::new(move |cc| {
             font::install(&cc.egui_ctx)?;
-            Ok(Box::new(Settings::load(config_path)))
+            let settings = Settings::load(config_path);
+            theme::apply(&cc.egui_ctx, settings.theme);
+            Ok(Box::new(settings))
         }),
     )
     .map_err(|e| anyhow!("could not open the settings window: {e}"))
@@ -106,6 +109,8 @@ struct Settings {
     others: Vec<Entry>,
     memory_watch: MemoryWatch,
     saved_memory_watch: MemoryWatch,
+    /// Saved as soon as it's picked, not with the Save button.
+    theme: Option<Theme>,
     /// Whether the file has a `[memory_watch]` section (we don't add one for defaults).
     had_memory_watch: bool,
     /// `None` where the Memory tab isn't offered (not Ubuntu / Mint).
@@ -134,6 +139,7 @@ impl Settings {
             Err(e) => (Document::default(), Some(format!("{e:#}"))),
         };
         let had_memory_watch = doc.memory_watch.is_some();
+        let theme = doc.theme;
         let memory_watch = doc.memory_watch.unwrap_or_default();
         let (here, others): (Vec<Entry>, Vec<Entry>) =
             doc.shortcuts.into_iter().partition(Entry::applies_here);
@@ -147,6 +153,7 @@ impl Settings {
             memory_watch,
             saved_memory_watch: memory_watch,
             had_memory_watch,
+            theme,
             #[cfg(target_os = "linux")]
             memory_tab: crate::memory::available().then(memory::MemoryTab::new),
             load_error,
@@ -186,6 +193,20 @@ impl Settings {
             .collect()
     }
 
+    /// Writes only the theme into the file as it is on disk, leaving unsaved edits unsaved.
+    fn save_theme(&mut self) {
+        if self.load_error.is_some() {
+            return;
+        }
+        let result = config::read_document(&self.path).and_then(|mut doc| {
+            doc.theme = self.theme;
+            config::save_document(&self.path, &doc)
+        });
+        if let Err(e) = result {
+            self.status = Some((format!("Couldn't save the theme: {e:#}"), true));
+        }
+    }
+
     /// Why the desktop would keep this combo for itself, if it would.
     fn desktop_conflict(&self, id: Option<u32>) -> Option<String> {
         let id = id?;
@@ -196,12 +217,18 @@ impl Settings {
         let mut shortcuts: Vec<Entry> = self.rows.iter().map(Row::to_entry).collect();
         let keep_watch = self.had_memory_watch || self.memory_watch != MemoryWatch::default();
         let memory_watch = keep_watch.then_some(self.memory_watch);
-        let result =
-            config::validate_document(Document { memory_watch, shortcuts: shortcuts.clone() })
-                .and_then(|_| {
-                    shortcuts.extend(self.others.iter().cloned());
-                    config::save_document(&self.path, &Document { memory_watch, shortcuts })
-                });
+        let result = config::validate_document(Document {
+            theme: self.theme,
+            memory_watch,
+            shortcuts: shortcuts.clone(),
+        })
+        .and_then(|_| {
+            shortcuts.extend(self.others.iter().cloned());
+            config::save_document(
+                &self.path,
+                &Document { theme: self.theme, memory_watch, shortcuts },
+            )
+        });
         match result {
             Ok(()) => {
                 self.saved = self.rows.clone();
@@ -454,6 +481,12 @@ impl eframe::App for Settings {
                 if self.memory_tab.is_some() {
                     ui.selectable_value(&mut self.tab, Tab::Memory, "Memory");
                 }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if theme::picker(ui, &mut self.theme) {
+                        theme::apply(ui.ctx(), self.theme);
+                        self.save_theme();
+                    }
+                });
             });
             ui.add_space(2.0);
         });
