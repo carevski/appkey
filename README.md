@@ -145,7 +145,7 @@ On Ubuntu, Linux Mint and other Ubuntu-based systems, the settings window has a 
 - **Memory, CPU and how long it has been running**, sortable by memory or CPU.
 - **Left running in the background**, listed first: programs with no window whose terminal, Claude session or IDE has already closed (old dev servers, Gradle daemons, scripts stuck in a loop). **Close all of these** clears them in one go.
 - **Show** brings an app's window to the front, so you can check before closing. **Close** asks a whole app to quit; **End** stops one process (for a Chrome tab: that tab shows "Aw, Snap!" and can be reloaded; which tab is which is only visible in Chrome's own Task Manager, <kbd>Shift</kbd>+<kbd>Esc</kbd>). If something doesn't quit within 5 seconds, **Force quit** appears.
-- The list holds still while the mouse pointer is in the window, so a click always hits what you aimed at.
+- Memory and CPU keep updating, but while the mouse pointer is in the window the rows stay where they are, so a click always hits what you aimed at. A program that quits meanwhile shows "ended"; new ones appear when the pointer leaves.
 
 **Uninstall an app you no longer need**, without remembering how you installed it: click **Uninstall…** on its row. appkey works out how it was installed and removes it the matching way:
 

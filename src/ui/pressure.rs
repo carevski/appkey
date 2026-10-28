@@ -117,8 +117,11 @@ struct Dialog {
     background: Vec<AppGroup>,
     apps: Vec<AppGroup>,
     refreshed: Instant,
-    /// The pointer is in the window: the list stays still so a click hits what was aimed at.
-    paused: bool,
+    /// The pointer is in the window: numbers keep updating, but rows don't come, go or
+    /// move, so a click hits what was aimed at.
+    holding: bool,
+    /// Listed processes that exited while rows were held; shown as "ended".
+    ended: HashSet<u32>,
     sort: SortBy,
     /// Selected apps, by root pid.
     selected: HashSet<u32>,
@@ -161,7 +164,8 @@ impl Dialog {
             background: Vec::new(),
             apps: Vec::new(),
             refreshed: Instant::now(),
-            paused: false,
+            holding: false,
+            ended: HashSet::new(),
             sort: if mode == Mode::Busy { SortBy::Cpu } else { SortBy::Memory },
             selected: HashSet::new(),
             collapsed: HashSet::new(),
@@ -210,7 +214,23 @@ impl Dialog {
             &self.titles,
             &self.home,
         );
-        self.procs = list.into_iter().map(|p| (p.pid, p)).collect();
+        let mut procs: HashMap<u32, Proc> = list.into_iter().map(|p| (p.pid, p)).collect();
+        if self.holding && self.refreshes > 2 {
+            // Same rows as before, with fresh numbers; what exited stays listed as ended.
+            let held: Vec<u32> = self.all_groups().flat_map(|g| g.members.clone()).collect();
+            self.ended = held.into_iter().filter(|pid| !procs.contains_key(pid)).collect();
+            for pid in &self.ended {
+                if let Some(p) = self.procs.remove(pid) {
+                    procs.insert(*pid, p);
+                }
+            }
+            self.procs = procs;
+            self.background = hold_rows(&self.background, &groups);
+            self.apps = hold_rows(&self.apps, &groups);
+            return;
+        }
+        self.ended.clear();
+        self.procs = procs;
         let (mut background, mut apps): (Vec<AppGroup>, Vec<AppGroup>) =
             groups.into_iter().partition(|g| g.detached && self.age(g.root) >= MIN_BACKGROUND_AGE);
         background.retain(|g| g.rss_kib >= MIN_BACKGROUND_KIB || self.group_cpu(g) >= 1.0);
@@ -332,9 +352,9 @@ impl Dialog {
         ui.heading(headline);
         ui.horizontal(|ui| {
             ui.label(s.summary());
-            if self.paused {
+            if self.holding {
                 ui.label(
-                    RichText::new("· updates paused while the pointer is here").weak().small(),
+                    RichText::new("· rows stay in place while the pointer is here").weak().small(),
                 );
             }
         });
@@ -418,7 +438,7 @@ impl Dialog {
         cell(ui, cpu_text(self.group_cpu(g)), CPU_W);
         cell(ui, self.age_text(g.root), AGE_W);
         ui.horizontal(|ui| {
-            if g.has_window {
+            if g.has_window && !self.ended.contains(&g.root) {
                 let window_pid = g.members.iter().copied().find(|p| self.titles.contains_key(p));
                 if let Some(pid) = window_pid
                     && ui
@@ -430,6 +450,9 @@ impl Dialog {
                 }
             }
             match self.closing_apps.get(&g.root) {
+                _ if self.ended.contains(&g.root) => {
+                    ui.label(RichText::new("ended").weak());
+                }
                 Some(t) if t.elapsed() >= GRACE => {
                     if ui
                         .small_button("Force quit")
@@ -451,6 +474,7 @@ impl Dialog {
             }
             // Leftovers in the background are rarely installed apps; offer it for the rest.
             if !g.detached
+                && !self.ended.contains(&g.root)
                 && ui
                     .small_button("Uninstall…")
                     .on_hover_text(
@@ -615,6 +639,9 @@ impl Dialog {
             );
             cell(ui, RichText::new(self.age_text(pid)).weak(), AGE_W);
             ui.horizontal(|ui| match self.closing_procs.get(&pid) {
+                _ if self.ended.contains(&pid) => {
+                    ui.label(RichText::new("ended").weak());
+                }
                 Some(t) if t.elapsed() >= GRACE => {
                     if ui.small_button("Force quit").clicked() {
                         action = Some(Action::ForceProc(pid));
@@ -736,6 +763,18 @@ fn truncate(s: &str, max: usize) -> String {
     }
 }
 
+/// The rows already listed, in the same order and with the same processes, but with
+/// sizes and labels from `fresh`. Groups that are gone keep their last state.
+fn hold_rows(listed: &[AppGroup], fresh: &[AppGroup]) -> Vec<AppGroup> {
+    listed
+        .iter()
+        .map(|old| match fresh.iter().find(|g| g.root == old.root) {
+            Some(g) => AppGroup { members: old.members.clone(), ..g.clone() },
+            None => old.clone(),
+        })
+        .collect()
+}
+
 /// Puts groups (and their processes) that were already listed back in their previous
 /// order; new ones follow in their sorted order.
 fn keep_order(groups: &mut [AppGroup], previous: &[AppGroup]) {
@@ -783,10 +822,11 @@ impl eframe::App for Dialog {
         if let Some(shot) = &mut self.devshot {
             shot.tick(&ctx);
         }
-        // Rows come and go (tabs, short-lived helpers) and would shift under the pointer.
-        // The first two refreshes always run: CPU use needs two samples.
-        self.paused = self.refreshes >= 2 && ctx.input(|i| i.pointer.has_pointer());
-        if !self.paused && self.refreshed.elapsed() >= REFRESH {
+        // Rows come and go (tabs, short-lived helpers) and would shift under the pointer,
+        // so while it's here only the numbers change. Not before CPU use is known (two
+        // samples), so the first order already reflects it.
+        self.holding = self.refreshes >= 2 && ctx.input(|i| i.pointer.has_pointer());
+        if self.refreshed.elapsed() >= REFRESH {
             self.refresh();
         }
         ctx.request_repaint_after(Duration::from_millis(500));
@@ -936,4 +976,33 @@ fn modal(ctx: &egui::Context, body: impl FnOnce(&mut egui::Ui)) {
         ui.set_max_width(520.0);
         body(ui);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn group(root: u32, members: &[u32], rss_kib: u64) -> AppGroup {
+        AppGroup {
+            root,
+            label: format!("app {root}"),
+            detail: String::new(),
+            members: members.to_vec(),
+            rss_kib,
+            has_window: false,
+            detached: false,
+        }
+    }
+
+    #[test]
+    fn held_rows_update_numbers_but_not_layout() {
+        let listed = [group(1, &[1, 2, 3], 100), group(5, &[5], 50)];
+        // 2 exited, 4 is new, 5 is gone, 9 is a new app.
+        let fresh = [group(9, &[9], 900), group(1, &[4, 3, 1], 300)];
+        let held = hold_rows(&listed, &fresh);
+        assert_eq!(held.iter().map(|g| g.root).collect::<Vec<_>>(), [1, 5]);
+        assert_eq!(held[0].members, [1, 2, 3]);
+        assert_eq!(held[0].rss_kib, 300);
+        assert_eq!(held[1], listed[1]);
+    }
 }
