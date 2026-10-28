@@ -709,8 +709,8 @@ impl ProcessesTab {
         ui.label(
             RichText::new(
                 "Memory as the kernel accounts it, which includes file cache, so it can be \
-                 more than the processes' own use. Limits are set by systemd (MemoryHigh / \
-                 MemoryMax).",
+                 more than the processes' own use. Limits are set by systemd (MemoryHigh, \
+                 MemoryMax, MemorySwapMax).",
             )
             .weak()
             .small(),
@@ -936,12 +936,20 @@ fn cell(ui: &mut egui::Ui, text: impl Into<egui::WidgetText>, width: f32) -> egu
 /// "limit 12 GB" (throttled above) and the hard maximum, when systemd set them.
 fn limit_text(m: CgroupMemory) -> Option<String> {
     let gb = |b: u64| memory::format_kib(b / 1024);
-    match (m.high, m.max) {
-        (Some(h), Some(x)) => Some(format!("limit {} (at most {})", gb(h), gb(x))),
-        (Some(h), None) => Some(format!("limit {}", gb(h))),
-        (None, Some(x)) => Some(format!("at most {}", gb(x))),
-        (None, None) => None,
+    let mut parts = Vec::new();
+    if let Some(x) = m.max {
+        parts.push(format!("limit {}", gb(x)));
     }
+    if let Some(h) = m.high {
+        parts.push(format!("slows from {}", gb(h)));
+    }
+    if let Some(s) = m.swap.filter(|&s| s >= 1 << 20) {
+        parts.push(format!("{} in swap", gb(s)));
+    }
+    if let Some(s) = m.swap_max {
+        parts.push(format!("swap up to {}", gb(s)));
+    }
+    (!parts.is_empty()).then(|| parts.join(", "))
 }
 
 fn cpu_text(pct: f32) -> String {

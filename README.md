@@ -167,7 +167,12 @@ Open it with **Show memory use now** on the Memory tab, `appkey memory`, or **it
 
 **Busy background programs.** Tick *Also warn when a program left running in the background keeps the CPU busy* and pick how long (10 minutes by default). If such a program uses a whole CPU core for that long, the Processes tab opens with it at the top.
 
-**Memory limit for apps started by appkey.** Tick *Limit how much memory apps opened with appkey's shortcuts use together*, choose a share of RAM (70% by default) or a fixed size, and click **Save**. Every app appkey starts from then on, with everything it starts in turn (an IDE's Gradle and Kotlin daemons, a browser's tabs), shares that one limit. When they reach it, Linux makes them give memory back and slows them down, instead of the whole computer, so the desktop and appkey stay responsive and you can close something. Only if they keep growing, to halfway between the limit and all of your RAM, does Linux end the biggest of them. The tab shows how much they use now.
+**Memory limit for apps started by appkey.** Tick *Limit how much memory apps opened with appkey's shortcuts use together*, choose how much RAM (a share, 70% by default, or a fixed size) and how much swap they may use after that (half of your swap by default), and click **Save**. Every app appkey starts from then on, with everything it starts in turn (an IDE's Gradle and Kotlin daemons, a browser's tabs), shares that one limit.
+
+- **They never use more RAM than the limit.** The rest stays free for the desktop, appkey and everything else.
+- **From 90% of the limit, Linux slows them down** and makes them give memory back: it drops their file cache and moves what they don't use to swap. Your other programs aren't touched. That gives you time to close something.
+- **Only when their share of swap is full too** does Linux end the biggest of them (usually the one that grew). With no swap allowed (`0 GB`), that happens at the limit.
+- The tab shows how much they use now, in RAM and in swap.
 
 - Not limited: apps you open from the menu or that were already running before you turned the limit on (open them again with the shortcut), and snaps and Flatpaks, which move themselves into their own group. *Group by cgroup* on the Processes tab shows what is inside the limit (`app-appkey.slice`).
 - Turning it off lifts the limit right away, and apps start normally again, as before.
@@ -177,7 +182,8 @@ Open it with **Show memory use now** on the Memory tab, `appkey memory`, or **it
   ```toml
   [memory_limit]
   enabled = true
-  limit = "70%"      # or e.g. "12 GB"; 10–95%, at least 1 GB
+  limit = "70%"      # RAM: or e.g. "12 GB"; 10–95%, at least 1 GB
+  swap = "50%"       # of your swap space, or e.g. "4 GB"; "0" = none
   ```
 
 **Emergency keys (Magic SysRq).** If the computer freezes before you can react, these keys still work because the Linux kernel handles them, not the desktop. Hold <kbd>Alt</kbd> and <kbd>PrtSc</kbd> (SysRq), then press:

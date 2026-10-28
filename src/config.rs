@@ -96,13 +96,16 @@ impl MemoryWatch {
 #[serde(default, deny_unknown_fields)]
 pub struct MemoryLimit {
     pub enabled: bool,
-    /// `"70%"` of RAM, or a size such as `"12 GB"` or `"8192 MB"`.
+    /// `"70%"` of RAM, or a size such as `"12 GB"` or `"8192 MB"`. Never exceeded.
     pub limit: LimitSize,
+    /// How much swap the apps may use on top, before the kernel ends one of them:
+    /// `"50%"` of the swap space, or a size (`"0 GB"`: none).
+    pub swap: LimitSize,
 }
 
 impl Default for MemoryLimit {
     fn default() -> Self {
-        Self { enabled: false, limit: LimitSize::Percent(70) }
+        Self { enabled: false, limit: LimitSize::Percent(70), swap: LimitSize::Percent(50) }
     }
 }
 
@@ -121,12 +124,18 @@ impl MemoryLimit {
             LimitSize::Mib(m) if m < Self::MIN_MIB => {
                 bail!("memory_limit: limit must be at least {} MB", Self::MIN_MIB)
             }
-            _ => Ok(()),
+            _ => {}
         }
+        if let LimitSize::Percent(p) = self.swap
+            && p > 100
+        {
+            bail!("memory_limit: swap can be at most 100% of the swap space");
+        }
+        Ok(())
     }
 }
 
-/// A share of RAM or a fixed size. Written as `"70%"`, `"12 GB"`, `"1.5 GB"`, `"8192 MB"`
+/// A share (of RAM, or of swap) or a fixed size. Written as `"70%"`, `"12 GB"`, `"1.5 GB"`, `"8192 MB"`
 /// (binary units, like the sizes appkey shows).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(try_from = "String", into = "String")]
@@ -136,7 +145,7 @@ pub enum LimitSize {
 }
 
 impl LimitSize {
-    /// The size in bytes on a machine with `total` bytes of RAM.
+    /// The size in bytes, where a share is of `total` bytes.
     pub fn bytes(self, total: u64) -> u64 {
         match self {
             Self::Percent(p) => total / 100 * u64::from(p),
@@ -153,6 +162,9 @@ impl TryFrom<String> for LimitSize {
         let t = s.trim();
         if let Some(p) = t.strip_suffix('%') {
             return p.trim().parse().map(Self::Percent).map_err(|_| bad());
+        }
+        if t == "0" {
+            return Ok(Self::Mib(0));
         }
         let split = t.find(|c: char| !(c.is_ascii_digit() || c == '.')).unwrap_or(t.len());
         let (num, unit) = t.split_at(split);
@@ -475,7 +487,7 @@ mod tests {
         assert_eq!(size(" 12 GB"), Ok(LimitSize::Mib(12 * 1024)));
         assert_eq!(size("1.5G"), Ok(LimitSize::Mib(1536)));
         assert_eq!(size("8192 MiB"), Ok(LimitSize::Mib(8192)));
-        for bad in ["", "%", "12", "12 TB", "-1 GB", "lots"] {
+        for bad in ["", "%", "12", "00", "12 TB", "-1 GB", "lots"] {
             assert!(size(bad).is_err(), "{bad:?}");
         }
         for (l, text) in [
@@ -491,7 +503,19 @@ mod tests {
         assert_eq!(LimitSize::Mib(2).bytes(1), 2 << 20);
 
         let cfg = parse("[memory_limit]\nenabled = true\nlimit = \"6 GB\"").unwrap();
-        assert_eq!(cfg.memory_limit, MemoryLimit { enabled: true, limit: LimitSize::Mib(6144) });
+        assert_eq!(
+            cfg.memory_limit,
+            MemoryLimit {
+                enabled: true,
+                limit: LimitSize::Mib(6144),
+                swap: LimitSize::Percent(50)
+            }
+        );
+        let cfg = parse("[memory_limit]\nswap = \"4 GB\"").unwrap();
+        assert_eq!(cfg.memory_limit.swap, LimitSize::Mib(4096));
+        assert_eq!(size("0"), Ok(LimitSize::Mib(0)));
+        assert_eq!(String::from(LimitSize::Mib(0)), "0 GB");
+        assert!(parse("[memory_limit]\nswap = \"101%\"").is_err());
         assert!(parse("[memory_limit]\nlimit = \"5%\"").is_err());
         assert!(parse("[memory_limit]\nlimit = \"512 MB\"").is_err());
         assert!(parse("[memory_limit]\nlimit = 70").is_err());
@@ -533,7 +557,11 @@ mod tests {
             theme: Some(Theme::Light),
             shortcuts: entries,
             memory_watch: Some(MemoryWatch { enabled: true, ..MemoryWatch::default() }),
-            memory_limit: Some(MemoryLimit { enabled: true, limit: LimitSize::Mib(1536) }),
+            memory_limit: Some(MemoryLimit {
+                enabled: true,
+                limit: LimitSize::Mib(1536),
+                swap: LimitSize::Percent(25),
+            }),
         };
         save_document(&path, &doc).unwrap();
         assert_eq!(read_document(&path).unwrap(), doc);

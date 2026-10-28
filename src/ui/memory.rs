@@ -23,6 +23,7 @@ pub struct MemoryTab {
     /// What the capped apps use now (`None`: none started yet), re-read every second.
     slice: (Instant, Option<CgroupMemory>),
     total_bytes: u64,
+    swap_bytes: u64,
 }
 
 impl MemoryTab {
@@ -35,7 +36,9 @@ impl MemoryTab {
             Some(v) if sysrq::allows(v, sysrq::SIGNAL) => v,
             _ => 240,
         };
-        let total_bytes = memory::read_snapshot().map_or(0, |s| s.mem.total_kib * 1024);
+        let mem = memory::read_snapshot().map(|s| s.mem);
+        let total_bytes = mem.map_or(0, |m| m.total_kib * 1024);
+        let swap_bytes = mem.map_or(0, |m| m.swap_total_kib * 1024);
         Self {
             current,
             saved,
@@ -44,6 +47,7 @@ impl MemoryTab {
             status: None,
             slice: (Instant::now(), read_slice()),
             total_bytes,
+            swap_bytes,
         }
     }
 
@@ -79,26 +83,30 @@ impl MemoryTab {
         ui.label(
             RichText::new(
                 "They share one limit, with everything they start (an IDE's builds, a \
-                 browser's tabs). At the limit Linux makes them give memory back and slows \
-                 them down instead of the whole computer, so the desktop and appkey stay \
-                 responsive and you can close something. Only if they keep growing does \
-                 Linux end the biggest of them, at the hard maximum halfway to all memory.",
+                 browser's tabs), and never use more RAM than that: the rest stays free for \
+                 the desktop, appkey and everything else. Near the limit Linux slows them \
+                 down and moves what they don't use to swap, so you have time to close \
+                 something. Only when their share of swap is full too does Linux end the \
+                 biggest of them.",
             )
             .weak(),
         );
         ui.add_space(4.0);
-        let total = self.total_bytes;
-        ui.add_enabled_ui(limit.enabled, |ui| size_picker(ui, limit, total));
+        let (total, swap) = (self.total_bytes, self.swap_bytes);
+        ui.add_enabled_ui(limit.enabled, |ui| limit_pickers(ui, limit, total, swap));
         ui.add_space(4.0);
         if self.slice.0.elapsed() >= Duration::from_secs(1) {
             self.slice = (Instant::now(), read_slice());
         }
         ui.ctx().request_repaint_after(Duration::from_secs(1));
         let now = match self.slice.1 {
-            Some(CgroupMemory { current: Some(used), high, .. }) => {
-                let cap = high
-                    .map_or_else(|| "no limit now".into(), |h| format!("limit {:.1} GB", gb(h)));
-                format!("Apps started with the limit use {:.1} GB now ({cap}).", gb(used))
+            Some(CgroupMemory { current: Some(used), max, swap: in_swap, .. }) => {
+                let cap =
+                    max.map_or_else(|| "no limit now".into(), |m| format!("limit {:.1} GB", gb(m)));
+                let in_swap = in_swap
+                    .filter(|&b| b >= 1 << 20)
+                    .map_or_else(String::new, |b| format!(" + {:.1} GB in swap", gb(b)));
+                format!("Apps started with the limit use {:.1} GB now{in_swap} ({cap}).", gb(used))
             }
             _ => "No app has been started with the limit yet.".into(),
         };
@@ -239,67 +247,106 @@ fn sysrq_keys(ui: &mut egui::Ui) {
     ui.add_space(8.0);
 }
 
-/// "Share of memory" (a % slider) or "Fixed size" (GB), and what that comes to here.
-fn size_picker(ui: &mut egui::Ui, limit: &mut MemoryLimit, total: u64) {
-    let total_gb = gb(total);
-    ui.horizontal(|ui| {
-        let mut percent = matches!(limit.limit, LimitSize::Percent(_));
-        if ui.radio_value(&mut percent, true, "Share of memory").clicked() {
-            let p = total.checked_div(100).map_or(70, |one| limit.limit.bytes(total) / one.max(1));
-            #[allow(clippy::cast_possible_truncation)]
-            let p = p.clamp(
-                u64::from(*MemoryLimit::PERCENT_RANGE.start()),
-                u64::from(*MemoryLimit::PERCENT_RANGE.end()),
-            ) as u8;
-            limit.limit = LimitSize::Percent(p);
-        }
-        if ui.radio_value(&mut percent, false, "Fixed size").clicked()
-            && let LimitSize::Percent(_) = limit.limit
-        {
-            let mib = limit.limit.bytes(total) / (1 << 20);
-            // Whole half-GBs read better.
-            let mib = (mib / 512 * 512).max(MemoryLimit::MIN_MIB);
-            limit.limit = LimitSize::Mib(mib);
-        }
-    });
-    ui.horizontal(|ui| {
-        ui.add_space(24.0);
-        match &mut limit.limit {
-            LimitSize::Percent(p) => {
-                ui.add(egui::Slider::new(p, MemoryLimit::PERCENT_RANGE).suffix(" % of RAM"));
-            }
-            LimitSize::Mib(mib) => {
-                #[allow(clippy::cast_precision_loss)]
-                let mut g = *mib as f64 / 1024.0;
-                let max = (total_gb * 0.95).max(1.0);
-                if ui
-                    .add(
-                        egui::DragValue::new(&mut g)
-                            .range(1.0..=max)
-                            .speed(0.1)
-                            .max_decimals(1)
-                            .suffix(" GB"),
-                    )
-                    .changed()
-                {
-                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                    {
-                        *mib = ((g * 10.0).round() * 102.4).round() as u64;
-                    }
-                }
-            }
-        }
+/// The RAM limit and the swap allowance, and what they come to here.
+fn limit_pickers(ui: &mut egui::Ui, limit: &mut MemoryLimit, total: u64, swap: u64) {
+    egui::Grid::new("memory-limit").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
+        ui.label("Memory (RAM)");
+        let max_gb = (gb(total) * 0.95).max(1.0);
+        size_picker(ui, "ram", &mut limit.limit, MemoryLimit::PERCENT_RANGE, 1.0..=max_gb, total);
+        ui.end_row();
+        ui.label("");
         if total > 0 {
-            let (high, max) = memory::cgroup::cap_properties(limit.limit.bytes(total), total);
+            let cap = memory::cgroup::cap_properties(
+                limit.limit.bytes(total),
+                limit.swap.bytes(swap),
+                total,
+            );
             ui.label(
                 RichText::new(format!(
-                    "= {:.1} GB, at most {:.1} GB, of {total_gb:.1} GB",
-                    gb(high),
-                    gb(max)
+                    "= {:.1} GB of {:.1} GB, never more. Slows down from {:.1} GB.",
+                    gb(cap.max),
+                    gb(total),
+                    gb(cap.high)
                 ))
                 .weak(),
             );
         }
+        ui.end_row();
+        ui.label("Then swap, up to");
+        if swap == 0 {
+            ui.label(RichText::new("This computer has no swap.").weak());
+        } else {
+            size_picker(ui, "swap", &mut limit.swap, 0..=100, 0.0..=gb(swap).max(0.1), swap);
+            ui.end_row();
+            ui.label("");
+            ui.label(
+                RichText::new(format!(
+                    "= {:.1} GB of {:.1} GB of swap, then Linux ends the biggest of them.",
+                    gb(limit.swap.bytes(swap).min(swap)),
+                    gb(swap)
+                ))
+                .weak(),
+            );
+        }
+        ui.end_row();
+    });
+}
+
+/// A share of `total` (a % slider) or a fixed size (GB).
+fn size_picker(
+    ui: &mut egui::Ui,
+    id: &str,
+    size: &mut LimitSize,
+    percent_range: std::ops::RangeInclusive<u8>,
+    gb_range: std::ops::RangeInclusive<f64>,
+    total: u64,
+) {
+    ui.horizontal(|ui| {
+        ui.push_id(id, |ui| {
+            let mut percent = matches!(size, LimitSize::Percent(_));
+            if ui.radio_value(&mut percent, true, "Share").clicked()
+                && let LimitSize::Mib(_) = size
+            {
+                let p = size.bytes(total).saturating_mul(100).checked_div(total).unwrap_or(0);
+                let (lo, hi) = (*percent_range.start(), *percent_range.end());
+                #[allow(clippy::cast_possible_truncation)]
+                let p = p.clamp(u64::from(lo), u64::from(hi)) as u8;
+                *size = LimitSize::Percent(p);
+            }
+            if ui.radio_value(&mut percent, false, "Fixed size").clicked()
+                && let LimitSize::Percent(_) = size
+            {
+                // Whole half-GBs read better.
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                let lo = (gb_range.start() * 1024.0) as u64;
+                let mib = (size.bytes(total) / (1 << 20) / 512 * 512).max(lo);
+                *size = LimitSize::Mib(mib);
+            }
+            match size {
+                LimitSize::Percent(p) => {
+                    ui.add(egui::Slider::new(p, percent_range).suffix(" %"));
+                }
+                LimitSize::Mib(mib) => {
+                    #[allow(clippy::cast_precision_loss)]
+                    let mut g = *mib as f64 / 1024.0;
+                    if ui
+                        .add(
+                            egui::DragValue::new(&mut g)
+                                .range(gb_range)
+                                .speed(0.1)
+                                .max_decimals(1)
+                                .suffix(" GB"),
+                        )
+                        .changed()
+                    {
+                        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                        {
+                            *mib = ((g * 10.0).round() * 102.4).round() as u64;
+                        }
+                    }
+                }
+            }
+        });
     });
 }
 

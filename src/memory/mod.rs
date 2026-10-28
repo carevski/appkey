@@ -29,10 +29,13 @@ pub fn is_supported_distro(os_release: &str) -> bool {
         .any(|id| matches!(id, "ubuntu" | "linuxmint"))
 }
 
+/// Sizes from `/proc/meminfo`, in KiB.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(clippy::struct_field_names)]
 pub struct MemInfo {
     pub total_kib: u64,
     pub available_kib: u64,
+    pub swap_total_kib: u64,
 }
 
 impl MemInfo {
@@ -47,7 +50,11 @@ pub fn parse_meminfo(text: &str) -> Option<MemInfo> {
             .find_map(|l| l.strip_prefix(name)?.strip_prefix(':'))
             .and_then(|v| v.split_whitespace().next()?.parse().ok())
     };
-    Some(MemInfo { total_kib: field("MemTotal")?, available_kib: field("MemAvailable")? })
+    Some(MemInfo {
+        total_kib: field("MemTotal")?,
+        available_kib: field("MemAvailable")?,
+        swap_total_kib: field("SwapTotal").unwrap_or(0),
+    })
 }
 
 /// The `some avg10` value of `/proc/pressure/memory`: the share of the last 10 s
@@ -541,6 +548,9 @@ mod linux {
         pub current: Option<u64>,
         pub high: Option<u64>,
         pub max: Option<u64>,
+        /// Bytes in swap (`memory.swap.current`) and the swap limit.
+        pub swap: Option<u64>,
+        pub swap_max: Option<u64>,
     }
 
     /// Where cgroup v2 is mounted: `/sys/fs/cgroup`, or `…/unified` on hybrid systems.
@@ -561,6 +571,8 @@ mod linux {
             current: read("memory.current").and_then(|t| t.trim().parse().ok()),
             high: read("memory.high").and_then(|t| super::cgroup::parse_limit(&t)),
             max: read("memory.max").and_then(|t| super::cgroup::parse_limit(&t)),
+            swap: read("memory.swap.current").and_then(|t| t.trim().parse().ok()),
+            swap_max: read("memory.swap.max").and_then(|t| super::cgroup::parse_limit(&t)),
         }
     }
 
@@ -590,9 +602,13 @@ mod linux {
     /// it. Apps already in it keep running either way.
     pub fn apply_limit(limit: crate::config::MemoryLimit) -> Result<()> {
         let cap = if limit.enabled && available() {
-            let total =
-                read_snapshot().context("couldn't read /proc/meminfo")?.mem.total_kib * 1024;
-            Some(super::cgroup::cap_properties(limit.limit.bytes(total), total))
+            let mem = read_snapshot().context("couldn't read /proc/meminfo")?.mem;
+            let (total, swap) = (mem.total_kib * 1024, mem.swap_total_kib * 1024);
+            Some(super::cgroup::cap_properties(
+                limit.limit.bytes(total),
+                limit.swap.bytes(swap),
+                total,
+            ))
         } else if cap_cgroup().is_some() {
             None
         } else {
@@ -708,7 +724,10 @@ mod tests {
     fn parses_meminfo_and_pressure() {
         let mem = parse_meminfo("MemTotal: 16000000 kB\nMemFree: 1 kB\nMemAvailable: 1200000 kB\n")
             .unwrap();
-        assert_eq!(mem, MemInfo { total_kib: 16_000_000, available_kib: 1_200_000 });
+        assert_eq!(
+            mem,
+            MemInfo { total_kib: 16_000_000, available_kib: 1_200_000, swap_total_kib: 0 }
+        );
         assert_eq!(mem.available_percent(), 7);
         assert_eq!(parse_meminfo("MemTotal: 1 kB\n"), None);
 
@@ -726,7 +745,7 @@ mod tests {
             ..MemoryWatch::default()
         };
         let snap = |avail, pressure| Snapshot {
-            mem: MemInfo { total_kib: 1000, available_kib: avail },
+            mem: MemInfo { total_kib: 1000, available_kib: avail, swap_total_kib: 0 },
             pressure,
         };
         assert!(!snap(500, Some(0.0)).is_stressed(watch));

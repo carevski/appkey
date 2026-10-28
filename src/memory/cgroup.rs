@@ -3,8 +3,8 @@
 //!
 //! systemd puts every process in a cgroup: the desktop and what its menu opens in the
 //! login session's `session-N.scope`, services in `user@UID.service/…`. Apps appkey
-//! starts while the cap is on run in [`SLICE`], whose `MemoryHigh` / `MemoryMax` the
-//! daemon sets through the user's own systemd (no root). Everything here is pure and
+//! starts while the cap is on run in [`SLICE`], whose `MemoryHigh` / `MemoryMax` /
+//! `MemorySwapMax` the daemon sets through the user's own systemd (no root). Everything here is pure and
 //! unit-tested on every host; `/proc`, `/sys/fs/cgroup` and `systemctl` are in
 //! `memory::linux`.
 
@@ -132,21 +132,32 @@ pub fn describe(name: &str) -> Option<&'static str> {
     })
 }
 
-/// `MemoryHigh` and `MemoryMax` for the shared cap, in bytes, on a machine with `total`
-/// bytes of RAM. At `MemoryHigh` the kernel slows the apps down and reclaims (swaps)
-/// their memory, so the rest of the system keeps working; `MemoryMax` (halfway to all
-/// of RAM) is the backstop where the kernel ends the biggest process of the group.
-pub fn cap_properties(limit: u64, total: u64) -> (u64, u64) {
-    let high = limit.min(total / 100 * 95);
-    (high, high + (total - high) / 2)
+/// The shared cap's systemd properties, in bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Cap {
+    /// `MemoryHigh`: from here the kernel slows the apps down and reclaims their memory
+    /// (drops their cache, swaps out what they don't use), not the rest of the system's.
+    pub high: u64,
+    /// `MemoryMax`: the limit itself. RAM the group never exceeds; the kernel ends the
+    /// biggest process of the group when it can't reclaim more.
+    pub max: u64,
+    /// `MemorySwapMax`: swap the group may fill before that happens.
+    pub swap: u64,
+}
+
+/// The cap for a `limit` of RAM (held below 95% of `total`) and `swap` bytes of swap.
+/// Slowing down starts at 90% of the limit, so there's time to close something.
+pub fn cap_properties(limit: u64, swap: u64, total: u64) -> Cap {
+    let max = limit.min(total / 100 * 95);
+    Cap { high: max / 10 * 9, max, swap }
 }
 
 /// `systemctl --user set-property` argv that applies the cap (`None`: lifts it), only
 /// until the user's systemd restarts (`--runtime`; the daemon applies it on start).
-pub fn set_property_argv(cap: Option<(u64, u64)>) -> Vec<String> {
-    let (high, max) = match cap {
-        Some((h, m)) => (h.to_string(), m.to_string()),
-        None => ("infinity".into(), "infinity".into()),
+pub fn set_property_argv(cap: Option<Cap>) -> Vec<String> {
+    let [high, max, swap] = match cap {
+        Some(c) => [c.high, c.max, c.swap].map(|b| b.to_string()),
+        None => ["infinity"; 3].map(str::to_owned),
     };
     [
         "/usr/bin/systemctl",
@@ -156,6 +167,7 @@ pub fn set_property_argv(cap: Option<(u64, u64)>) -> Vec<String> {
         SLICE,
         &format!("MemoryHigh={high}"),
         &format!("MemoryMax={max}"),
+        &format!("MemorySwapMax={swap}"),
     ]
     .map(str::to_owned)
     .to_vec()
@@ -296,17 +308,21 @@ mod tests {
     }
 
     #[test]
-    fn cap_leaves_room_and_has_a_backstop() {
+    fn cap_is_never_exceeded() {
         let gib = 1 << 30;
-        assert_eq!(cap_properties(12 * gib, 16 * gib), (12 * gib, 14 * gib));
+        let cap = cap_properties(10 * gib, 2 * gib, 16 * gib);
+        assert_eq!(cap, Cap { high: 9 * gib, max: 10 * gib, swap: 2 * gib });
         // A fixed size bigger than RAM is held below it.
-        let (high, max) = cap_properties(64 * gib, 16 * gib);
-        assert!(high < 16 * gib && max < 16 * gib && high < max);
+        let cap = cap_properties(64 * gib, 0, 16 * gib);
+        assert!(cap.high < cap.max && cap.max < 16 * gib);
         assert_eq!(
             set_property_argv(None)[4..],
-            [SLICE, "MemoryHigh=infinity", "MemoryMax=infinity"]
+            [SLICE, "MemoryHigh=infinity", "MemoryMax=infinity", "MemorySwapMax=infinity"]
         );
-        assert_eq!(set_property_argv(Some((1, 2)))[5..], ["MemoryHigh=1", "MemoryMax=2"]);
+        assert_eq!(
+            set_property_argv(Some(Cap { high: 1, max: 2, swap: 0 }))[5..],
+            ["MemoryHigh=1", "MemoryMax=2", "MemorySwapMax=0"]
+        );
     }
 
     #[test]
