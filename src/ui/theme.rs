@@ -7,16 +7,6 @@ use eframe::egui;
 use crate::config::Theme;
 use crate::platform;
 
-/// The saved choice; `None` (follow the system) when there is none or the file is unreadable.
-/// For the memory window, which doesn't load the whole config.
-#[cfg(target_os = "linux")]
-pub fn saved() -> Option<Theme> {
-    crate::config::path()
-        .ok()
-        .and_then(|p| crate::config::read_document(&p).ok())
-        .and_then(|d| d.theme)
-}
-
 pub fn apply(ctx: &egui::Context, choice: Option<Theme>) {
     let theme = match choice {
         Some(Theme::Light) => egui::Theme::Light,

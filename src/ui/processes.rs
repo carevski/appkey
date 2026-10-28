@@ -1,7 +1,8 @@
-//! `appkey memory [--alert | --busy]`: the user's apps, grouped through the process
-//! tree (Chrome with its tabs, an IDE with its helpers, each terminal tab), with memory,
-//! CPU and running time, and buttons to close a whole app or one of its processes.
-//! Apps left running in the background are listed first.
+//! "Processes" tab (`appkey memory [--alert | --busy]` opens settings on it): the
+//! user's apps, grouped through the process tree (Chrome with its tabs, an IDE with its
+//! helpers, each terminal tab), or by cgroup, with memory, CPU and running time, and
+//! buttons to close a whole app or one of its processes. Apps left running in the
+//! background are listed first.
 //!
 //! The daemon opens it with `--alert` when memory runs low and with `--busy` when a
 //! background program keeps the CPU busy. Closing sends `SIGTERM` so programs can
@@ -11,12 +12,12 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::time::{Duration, Instant};
 
-use anyhow::{Result, anyhow};
 use eframe::egui::{self, Button, RichText};
 
-use crate::config::{self, MemoryWatch};
+use crate::config::MemoryWatch;
+use crate::memory::cgroup::{self, Node};
 use crate::memory::procs::{self, AppGroup, Proc};
-use crate::memory::{self, Snapshot, sysrq, uninstall};
+use crate::memory::{self, CgroupMemory, Snapshot, Warning, sysrq, uninstall};
 use crate::platform;
 
 const REFRESH: Duration = Duration::from_secs(2);
@@ -34,15 +35,14 @@ const MIN_BACKGROUND_KIB: u64 = 5 * 1024;
 /// Freshly started background programs aren't "left running" yet.
 const MIN_BACKGROUND_AGE: f64 = 60.0;
 
-/// Why the window was opened.
+/// Why the tab is showing: by hand (`None`), or for a warning from the daemon.
+pub type Mode = Option<Warning>;
+
+/// What the user said about a warning.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Mode {
-    /// By hand (`appkey memory`, the settings tab, a shortcut).
-    Manual,
-    /// Memory is running low.
-    LowMemory,
-    /// A background program keeps the CPU busy.
-    Busy,
+pub enum Answer {
+    Dismiss,
+    Snooze,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,42 +51,14 @@ enum SortBy {
     Cpu,
 }
 
-/// Returns `true` if the user snoozed the warning.
-pub fn run(mode: Mode) -> Result<bool> {
-    let snoozed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let flag = snoozed.clone();
-    let title = match mode {
-        Mode::Manual => "appkey: memory use",
-        Mode::LowMemory => "appkey: memory is running low",
-        Mode::Busy => "appkey: a background program is busy",
-    };
-    let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title(title)
-            .with_app_id("appkey")
-            .with_inner_size([940.0, 620.0])
-            .with_min_inner_size([560.0, 360.0])
-            .with_window_level(if mode == Mode::Manual {
-                egui::WindowLevel::Normal
-            } else {
-                egui::WindowLevel::AlwaysOnTop
-            }),
-        ..Default::default()
-    };
-    eframe::run_native(
-        "appkey-memory",
-        options,
-        Box::new(move |cc| {
-            super::font::install(&cc.egui_ctx)?;
-            super::theme::apply(&cc.egui_ctx, super::theme::saved());
-            Ok(Box::new(Dialog::new(mode, flag)))
-        }),
-    )
-    .map_err(|e| anyhow!("could not open the memory window: {e}"))?;
-    Ok(snoozed.load(std::sync::atomic::Ordering::SeqCst))
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GroupBy {
+    App,
+    Cgroup,
 }
 
 /// What a click in the table asked for.
+#[derive(Debug)]
 enum Action {
     Close(Vec<u32>),
     ForceGroup(u32),
@@ -98,9 +70,8 @@ enum Action {
 }
 
 #[derive(Debug)]
-struct Dialog {
+pub struct ProcessesTab {
     mode: Mode,
-    snoozed: std::sync::Arc<std::sync::atomic::AtomicBool>,
     watch: MemoryWatch,
     uid: u32,
     home: String,
@@ -123,6 +94,16 @@ struct Dialog {
     /// Listed processes that exited while rows were held; shown as "ended".
     ended: HashSet<u32>,
     sort: SortBy,
+    group_by: GroupBy,
+    /// The user's processes by cgroup (built only while that view is shown).
+    tree: Vec<Node>,
+    /// What the kernel accounts to each cgroup in `tree`, by path.
+    cgroup_memory: HashMap<String, CgroupMemory>,
+    /// Cgroups whose open / closed state the user flipped (big ones start open).
+    toggled: HashSet<String>,
+    /// Cgroups showing all their processes.
+    show_all_cgroups: HashSet<String>,
+    pending: Option<Action>,
     /// Selected apps, by root pid.
     selected: HashSet<u32>,
     /// Apps are expanded unless collapsed here.
@@ -135,20 +116,12 @@ struct Dialog {
     status: Option<String>,
     sysrq_f: bool,
     uninstall: Option<Uninstall>,
-    #[cfg(debug_assertions)]
-    devshot: Option<super::devshot::DevShot>,
 }
 
-impl Dialog {
-    fn new(mode: Mode, snoozed: std::sync::Arc<std::sync::atomic::AtomicBool>) -> Self {
-        let watch = config::path()
-            .ok()
-            .and_then(|p| config::read_document(&p).ok())
-            .and_then(|d| d.memory_watch)
-            .unwrap_or_default();
+impl ProcessesTab {
+    pub fn new(mode: Mode, watch: MemoryWatch) -> Self {
         let mut d = Self {
             mode,
-            snoozed,
             watch,
             uid: memory::current_uid(),
             home: dirs::home_dir().map(|h| h.to_string_lossy().into_owned()).unwrap_or_default(),
@@ -166,7 +139,13 @@ impl Dialog {
             refreshed: Instant::now(),
             holding: false,
             ended: HashSet::new(),
-            sort: if mode == Mode::Busy { SortBy::Cpu } else { SortBy::Memory },
+            sort: if mode == Some(Warning::Busy) { SortBy::Cpu } else { SortBy::Memory },
+            group_by: GroupBy::App,
+            tree: Vec::new(),
+            cgroup_memory: HashMap::new(),
+            toggled: HashSet::new(),
+            show_all_cgroups: HashSet::new(),
+            pending: None,
             selected: HashSet::new(),
             collapsed: HashSet::new(),
             show_all: HashSet::new(),
@@ -175,13 +154,32 @@ impl Dialog {
             status: None,
             sysrq_f: sysrq::read_current().is_ok_and(|v| sysrq::allows(v, sysrq::SIGNAL)),
             uninstall: None,
-            #[cfg(debug_assertions)]
-            devshot: super::devshot::DevShot::from_env(),
         };
         d.refresh();
         // CPU needs two samples: take the second one soon.
         d.refreshed = Instant::now().checked_sub(REFRESH / 2).unwrap_or_else(Instant::now);
         d
+    }
+
+    pub fn mode(&self) -> Mode {
+        self.mode
+    }
+
+    /// Shows a (new) warning, or none. The thresholds may have been saved since.
+    pub fn set_mode(&mut self, mode: Mode, watch: MemoryWatch) {
+        self.watch = watch;
+        if mode != self.mode && mode.is_some() {
+            self.sort = if mode == Some(Warning::Busy) { SortBy::Cpu } else { SortBy::Memory };
+            self.group_by = GroupBy::App;
+            self.refresh();
+        }
+        self.mode = mode;
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn show_cgroups(&mut self) {
+        self.group_by = GroupBy::Cgroup;
+        self.refresh();
     }
 
     fn refresh(&mut self) {
@@ -214,10 +212,14 @@ impl Dialog {
             &self.titles,
             &self.home,
         );
+        if self.group_by == GroupBy::Cgroup {
+            self.refresh_tree(&list);
+        }
         let mut procs: HashMap<u32, Proc> = list.into_iter().map(|p| (p.pid, p)).collect();
         if self.holding && self.refreshes > 2 {
             // Same rows as before, with fresh numbers; what exited stays listed as ended.
-            let held: Vec<u32> = self.all_groups().flat_map(|g| g.members.clone()).collect();
+            let mut held: Vec<u32> = self.all_groups().flat_map(|g| g.members.clone()).collect();
+            held.extend(self.tree.iter().flat_map(Node::walk).flat_map(|n| n.procs.clone()));
             self.ended = held.into_iter().filter(|pid| !procs.contains_key(pid)).collect();
             for pid in &self.ended {
                 if let Some(p) = self.procs.remove(pid) {
@@ -227,6 +229,10 @@ impl Dialog {
             self.procs = procs;
             self.background = hold_rows(&self.background, &groups);
             self.apps = hold_rows(&self.apps, &groups);
+            let rss = |pid: u32| self.procs.get(&pid).map(|p| p.rss_kib);
+            for n in &mut self.tree {
+                n.recount(&rss);
+            }
             return;
         }
         self.ended.clear();
@@ -251,6 +257,25 @@ impl Dialog {
         self.selected.retain(|r| roots.contains(r));
         self.closing_apps.retain(|r, _| roots.contains(r));
         self.closing_procs.retain(|p, _| self.procs.contains_key(p));
+    }
+
+    /// Rebuilds the cgroup tree, unless rows are held (then only the kernel's numbers
+    /// change; [`Node::recount`] updates the sums).
+    fn refresh_tree(&mut self, list: &[Proc]) {
+        if !(self.holding && self.refreshes > 2) {
+            let items: Vec<(u32, &str, u64)> = list
+                .iter()
+                .filter(|p| p.uid == self.uid && !p.cgroup.is_empty())
+                .map(|p| (p.pid, p.cgroup.as_str(), p.rss_kib))
+                .collect();
+            self.tree = cgroup::build_tree(&items);
+        }
+        self.cgroup_memory = self
+            .tree
+            .iter()
+            .flat_map(Node::walk)
+            .map(|n| (n.path.clone(), memory::read_cgroup_memory(&n.path)))
+            .collect();
     }
 
     fn all_groups(&self) -> impl Iterator<Item = &AppGroup> {
@@ -344,10 +369,10 @@ impl Dialog {
         };
         let stressed = s.is_stressed(self.watch);
         let headline = match (self.mode, stressed) {
-            (Mode::LowMemory, true) => "Your computer is running low on memory",
-            (Mode::LowMemory, false) => "Memory is back to normal",
-            (Mode::Busy, _) => "A program in the background keeps the CPU busy",
-            (Mode::Manual, _) => "What's running",
+            (Some(Warning::LowMemory), true) => "Your computer is running low on memory",
+            (Some(Warning::LowMemory), false) => "Memory is back to normal",
+            (Some(Warning::Busy), _) => "A program in the background keeps the CPU busy",
+            (None, _) => "What's running",
         };
         ui.heading(headline);
         ui.horizontal(|ui| {
@@ -358,7 +383,7 @@ impl Dialog {
                 );
             }
         });
-        if self.mode == Mode::LowMemory && stressed {
+        if self.mode == Some(Warning::LowMemory) && stressed {
             ui.label(
                 "Close something you don't need, or the system may slow down and freeze. \
                  Programs get the chance to save first.",
@@ -678,6 +703,147 @@ impl Dialog {
         action
     }
 
+    /// The user's processes in the cgroup tree: slices, services and scopes, with what
+    /// the kernel counts for each (`memory.current`) and any limit set on it.
+    fn cgroup_view(&mut self, ui: &mut egui::Ui) -> Option<Action> {
+        ui.label(
+            RichText::new(
+                "Memory as the kernel accounts it, which includes file cache, so it can be \
+                 more than the processes' own use. Limits are set by systemd (MemoryHigh / \
+                 MemoryMax).",
+            )
+            .weak()
+            .small(),
+        );
+        ui.add_space(4.0);
+        let tree = std::mem::take(&mut self.tree);
+        let mut action = None;
+        egui::Grid::new("cgroups")
+            .num_columns(5)
+            .spacing([8.0, 4.0])
+            .striped(true)
+            .min_col_width(0.0)
+            .show(ui, |ui| {
+                for h in ["", "Memory", "CPU", "Running", ""] {
+                    ui.label(RichText::new(h).small().weak());
+                }
+                ui.end_row();
+                for n in &tree {
+                    if let Some(a) = self.cgroup_rows(ui, n, 0) {
+                        action = Some(a);
+                    }
+                }
+            });
+        self.tree = tree;
+        if self.tree.is_empty() {
+            ui.label("Couldn't read the processes' cgroups (is this cgroup v2?).");
+        }
+        action
+    }
+
+    fn cgroup_rows(&mut self, ui: &mut egui::Ui, n: &Node, depth: usize) -> Option<Action> {
+        let mut action = None;
+        // Big ones start open; a click flips that.
+        let open = (n.rss_kib >= 5 * MIN_KIB) != self.toggled.contains(&n.path);
+        let kernel = self.cgroup_memory.get(&n.path).copied().unwrap_or_default();
+        #[allow(clippy::cast_precision_loss)]
+        let indent = 18.0 * depth as f32;
+        ui.horizontal(|ui| {
+            ui.add_space(indent);
+            if disclosure(ui, open).clicked() && !self.toggled.remove(&n.path) {
+                self.toggled.insert(n.path.clone());
+            }
+            let ours = n.name.ends_with(cgroup::SLICE);
+            let mut name = RichText::new(format!("{}  ({})", n.name, n.count)).strong();
+            if ours {
+                name = name.color(ui.visuals().selection.stroke.color);
+            }
+            let mut hover = n.path.clone();
+            if let Some(d) = cgroup::describe(&n.name) {
+                ui.add(egui::Label::new(name)).on_hover_text(&hover);
+                ui.label(RichText::new(d).weak());
+            } else {
+                let _ = write!(hover, "\n{} process(es)", n.count);
+                ui.add(egui::Label::new(name)).on_hover_text(hover);
+            }
+            if let Some(limit) = limit_text(kernel) {
+                ui.label(RichText::new(limit).color(ui.visuals().warn_fg_color).small());
+            }
+        });
+        let used = kernel.current.map_or(n.rss_kib, |b| b / 1024);
+        cell(ui, memory::format_kib(used), MEM_W)
+            .on_hover_text(format!("Processes' own memory: {}", memory::format_kib(n.rss_kib)));
+        cell(ui, cpu_text(self.node_cpu(n)), CPU_W);
+        cell(ui, "", AGE_W);
+        ui.label("");
+        ui.end_row();
+        if !open {
+            return None;
+        }
+        for c in &n.children {
+            if let Some(a) = self.cgroup_rows(ui, c, depth + 1) {
+                action = Some(a);
+            }
+        }
+        let all = self.show_all_cgroups.contains(&n.path);
+        let shown = if all { n.procs.len() } else { MAX_CHILDREN.min(n.procs.len()) };
+        for &pid in &n.procs[..shown] {
+            if let Some(a) = self.proc_row(ui, pid, indent + 36.0) {
+                action = Some(a);
+            }
+        }
+        if shown < n.procs.len() {
+            let rest = &n.procs[shown..];
+            let kib: u64 = rest.iter().filter_map(|p| self.procs.get(p)).map(|p| p.rss_kib).sum();
+            ui.horizontal(|ui| {
+                ui.add_space(indent + 36.0);
+                let text = format!("… {} more ({})", rest.len(), memory::format_kib(kib));
+                if ui.link(text).clicked() {
+                    self.show_all_cgroups.insert(n.path.clone());
+                }
+            });
+            ui.end_row();
+        }
+        action
+    }
+
+    /// One process in the cgroup view: what it is, its numbers, and End.
+    fn proc_row(&self, ui: &mut egui::Ui, pid: u32, indent: f32) -> Option<Action> {
+        let p = self.procs.get(&pid)?;
+        let mut action = None;
+        ui.horizontal(|ui| {
+            ui.add_space(indent);
+            ui.label(truncate(&procs::describe(p), 48)).on_hover_text(self.hover(pid, None));
+        });
+        cell(ui, RichText::new(memory::format_kib(p.rss_kib)).weak(), MEM_W);
+        cell(ui, RichText::new(cpu_text(self.cpu.get(&pid).copied().unwrap_or(0.0))).weak(), CPU_W);
+        cell(ui, RichText::new(self.age_text(pid)).weak(), AGE_W);
+        ui.horizontal(|ui| match self.closing_procs.get(&pid) {
+            _ if self.ended.contains(&pid) => {
+                ui.label(RichText::new("ended").weak());
+            }
+            Some(t) if t.elapsed() >= GRACE => {
+                if ui.small_button("Force quit").clicked() {
+                    action = Some(Action::ForceProc(pid));
+                }
+            }
+            Some(_) => {
+                ui.label(RichText::new("closing…").weak());
+            }
+            None => {
+                if ui.small_button("End").on_hover_text("End just this process").clicked() {
+                    action = Some(Action::End(pid));
+                }
+            }
+        });
+        ui.end_row();
+        action
+    }
+
+    fn node_cpu(&self, n: &Node) -> f32 {
+        n.walk().iter().flat_map(|n| &n.procs).filter_map(|p| self.cpu.get(p)).sum()
+    }
+
     /// Full details for a tooltip: what it runs, where, and its pid.
     fn hover(&self, pid: u32, titles: Option<&str>) -> String {
         let Some(p) = self.procs.get(&pid) else { return String::new() };
@@ -692,8 +858,10 @@ impl Dialog {
         s
     }
 
-    fn footer(&mut self, ui: &mut egui::Ui) -> Option<Action> {
+    /// Close selected, sorting and grouping, and Dismiss / Snooze while warning.
+    pub fn footer(&mut self, ui: &mut egui::Ui) -> Option<Answer> {
         let mut action = None;
+        let mut answer = None;
         let tip = if self.sysrq_f {
             "If the desktop freezes before you can react: hold Alt+PrtSc and press F. \
              For Chrome's individual tabs, Chrome's own Task Manager: Shift+Esc."
@@ -713,6 +881,17 @@ impl Dialog {
                 action = Some(Action::Close(roots));
             }
             ui.separator();
+            ui.label("Group by");
+            let before = self.group_by;
+            ui.selectable_value(&mut self.group_by, GroupBy::App, "app");
+            ui.selectable_value(&mut self.group_by, GroupBy::Cgroup, "cgroup").on_hover_text(
+                "How the system accounts memory: systemd slices, services and scopes. \
+                 Apps started with the memory limit on share one slice.",
+            );
+            if self.group_by != before {
+                self.refresh();
+            }
+            ui.separator();
             ui.label("Sort by");
             let before = self.sort;
             ui.selectable_value(&mut self.sort, SortBy::Memory, "memory");
@@ -724,21 +903,24 @@ impl Dialog {
                 self.sort_groups(&mut a);
                 (self.background, self.apps) = (b, a);
             }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let alert = self.mode != Mode::Manual;
-                if ui.button(if alert { "Dismiss" } else { "Close" }).clicked() {
-                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
-                }
-                if alert && ui.button("Snooze for an hour").clicked() {
-                    self.snoozed.store(true, std::sync::atomic::Ordering::SeqCst);
-                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
-                }
-            });
+            if self.mode.is_some() {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("Dismiss").clicked() {
+                        answer = Some(Answer::Dismiss);
+                    }
+                    if ui.button("Snooze for an hour").clicked() {
+                        answer = Some(Answer::Snooze);
+                    }
+                });
+            }
         });
         if let Some(s) = &self.status {
             ui.label(RichText::new(s).weak());
         }
-        action
+        if action.is_some() {
+            self.pending = action;
+        }
+        answer
     }
 }
 
@@ -747,8 +929,19 @@ const MEM_W: f32 = 56.0;
 const CPU_W: f32 = 60.0;
 const AGE_W: f32 = 60.0;
 
-fn cell(ui: &mut egui::Ui, text: impl Into<egui::WidgetText>, width: f32) {
-    ui.add_sized([width, 18.0], egui::Label::new(text));
+fn cell(ui: &mut egui::Ui, text: impl Into<egui::WidgetText>, width: f32) -> egui::Response {
+    ui.add_sized([width, 18.0], egui::Label::new(text))
+}
+
+/// "limit 12 GB" (throttled above) and the hard maximum, when systemd set them.
+fn limit_text(m: CgroupMemory) -> Option<String> {
+    let gb = |b: u64| memory::format_kib(b / 1024);
+    match (m.high, m.max) {
+        (Some(h), Some(x)) => Some(format!("limit {} (at most {})", gb(h), gb(x))),
+        (Some(h), None) => Some(format!("limit {}", gb(h))),
+        (None, Some(x)) => Some(format!("at most {}", gb(x))),
+        (None, None) => None,
+    }
 }
 
 fn cpu_text(pct: f32) -> String {
@@ -815,13 +1008,10 @@ fn disclosure(ui: &mut egui::Ui, open: bool) -> egui::Response {
     response.on_hover_text(if open { "Collapse" } else { "Expand" })
 }
 
-impl eframe::App for Dialog {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+impl ProcessesTab {
+    /// The tab's body. Call [`Self::finish`] after the footer.
+    pub fn show(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
-        #[cfg(debug_assertions)]
-        if let Some(shot) = &mut self.devshot {
-            shot.tick(&ctx);
-        }
         // Rows come and go (tabs, short-lived helpers) and would shift under the pointer,
         // so while it's here only the numbers change. Not before CPU use is known (two
         // samples), so the first order already reflects it.
@@ -830,50 +1020,53 @@ impl eframe::App for Dialog {
             self.refresh();
         }
         ctx.request_repaint_after(Duration::from_millis(500));
-
         let mut action = None;
-        egui::Panel::bottom("memory-actions").show(ui, |ui| {
-            ui.add_space(6.0);
-            action = self.footer(ui);
-            ui.add_space(6.0);
-        });
-        egui::CentralPanel::default().show(ui, |ui| {
-            self.header(ui);
-            ui.add_space(8.0);
-            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                if !self.background.is_empty() {
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new("Left running in the background").strong().color(ui.visuals().warn_fg_color));
-                        if ui
-                            .small_button("Close all of these")
-                            .on_hover_text("Asks every program in this list to quit")
-                            .clicked()
-                        {
-                            action = Some(Action::Close(self.background.iter().map(|g| g.root).collect()));
-                        }
-                    });
-                    ui.label(
-                        RichText::new(
-                            "No window, and whatever started them (a terminal, Claude, an IDE) has closed.",
-                        )
-                        .weak()
-                        .small(),
-                    );
-                    if let Some(a) = self.section(ui, true) {
-                        action = Some(a);
+        self.header(ui);
+        ui.add_space(8.0);
+        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+            if self.group_by == GroupBy::Cgroup {
+                action = self.cgroup_view(ui);
+                return;
+            }
+            if !self.background.is_empty() {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Left running in the background").strong().color(ui.visuals().warn_fg_color));
+                    if ui
+                        .small_button("Close all of these")
+                        .on_hover_text("Asks every program in this list to quit")
+                        .clicked()
+                    {
+                        action = Some(Action::Close(self.background.iter().map(|g| g.root).collect()));
                     }
-                    ui.add_space(10.0);
-                    ui.label(RichText::new("Apps").strong());
-                }
-                if self.apps.is_empty() {
-                    ui.label("Nothing else is using much memory or CPU.");
-                } else if let Some(a) = self.section(ui, false) {
+                });
+                ui.label(
+                    RichText::new(
+                        "No window, and whatever started them (a terminal, Claude, an IDE) has closed.",
+                    )
+                    .weak()
+                    .small(),
+                );
+                if let Some(a) = self.section(ui, true) {
                     action = Some(a);
                 }
-            });
+                ui.add_space(10.0);
+                ui.label(RichText::new("Apps").strong());
+            }
+            if self.apps.is_empty() {
+                ui.label("Nothing else is using much memory or CPU.");
+            } else if let Some(a) = self.section(ui, false) {
+                action = Some(a);
+            }
         });
-        self.uninstall_dialog(&ctx);
-        if let Some(a) = action.filter(|_| self.uninstall.is_none()) {
+        if action.is_some() {
+            self.pending = action;
+        }
+    }
+
+    /// The uninstall dialog, and what was clicked in the tab this frame.
+    pub fn finish(&mut self, ctx: &egui::Context) {
+        self.uninstall_dialog(ctx);
+        if let Some(a) = self.pending.take().filter(|_| self.uninstall.is_none()) {
             self.apply(a);
         }
     }

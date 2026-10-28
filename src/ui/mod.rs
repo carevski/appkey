@@ -10,7 +10,7 @@ mod keys;
 mod memory;
 mod picker;
 #[cfg(target_os = "linux")]
-mod pressure;
+mod processes;
 mod theme;
 
 use std::path::PathBuf;
@@ -18,25 +18,61 @@ use std::path::PathBuf;
 use anyhow::{Result, anyhow};
 use eframe::egui::{self, Button, Color32, RichText};
 
-use crate::config::{self, Document, Entry, MemoryWatch, Theme};
+use crate::config::{self, Document, Entry, MemoryLimit, MemoryWatch, Theme};
 use crate::platform::{self, AppInfo};
 use keys::Recorded;
 use picker::Picker;
 
+/// `appkey settings`.
 pub fn run(config_path: PathBuf) -> Result<()> {
-    let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title("appkey settings")
-            .with_app_id("appkey")
-            .with_inner_size([660.0, 560.0])
-            .with_min_inner_size([520.0, 300.0]),
-        ..Default::default()
+    open(config_path, None)
+}
+
+/// `appkey memory [--alert | --busy]`: settings, on the Processes tab. `Some(None)` is
+/// opened by hand, `Some(Some(_))` for a warning from the daemon.
+#[cfg(target_os = "linux")]
+pub fn memory_window(config_path: PathBuf, warning: Option<crate::memory::Warning>) -> Result<()> {
+    open(config_path, Some(warning))
+}
+
+#[cfg(target_os = "linux")]
+type Start = Option<processes::Mode>;
+#[cfg(not(target_os = "linux"))]
+type Start = Option<()>;
+
+fn open(config_path: PathBuf, start: Start) -> Result<()> {
+    let title = window_title(start);
+    let viewport = egui::ViewportBuilder::default()
+        .with_title(title)
+        .with_app_id("appkey")
+        .with_inner_size(if start.is_some() { [940.0, 620.0] } else { [660.0, 560.0] })
+        .with_min_inner_size([520.0, 300.0]);
+    // A warning stays in view, but doesn't take the keyboard from what you're doing.
+    #[cfg(target_os = "linux")]
+    let viewport = if start.is_some_and(|m| m.is_some()) {
+        viewport.with_window_level(egui::WindowLevel::AlwaysOnTop)
+    } else {
+        viewport
     };
+    #[cfg(target_os = "linux")]
+    requests::listen();
     eframe::run_native(
         "appkey",
-        options,
+        eframe::NativeOptions { viewport, ..Default::default() },
         Box::new(move |cc| {
             font::install(&cc.egui_ctx)?;
+            #[cfg(target_os = "linux")]
+            requests::wake_on_request(cc.egui_ctx.clone());
+            #[cfg(target_os = "linux")]
+            let settings = {
+                let mut settings = Settings::load(config_path);
+                if let Some(mode) = start {
+                    settings.show_processes(mode);
+                    settings.close_after_answer = mode.is_some();
+                }
+                settings
+            };
+            #[cfg(not(target_os = "linux"))]
             let settings = Settings::load(config_path);
             theme::apply(&cc.egui_ctx, settings.theme);
             Ok(Box::new(settings))
@@ -45,13 +81,70 @@ pub fn run(config_path: PathBuf) -> Result<()> {
     .map_err(|e| anyhow!("could not open the settings window: {e}"))
 }
 
-#[cfg(target_os = "linux")]
-pub use pressure::Mode as MemoryMode;
+fn window_title(start: Start) -> &'static str {
+    #[cfg(target_os = "linux")]
+    {
+        use crate::memory::Warning;
+        match start {
+            Some(Some(Warning::LowMemory)) => return "appkey: memory is running low",
+            Some(Some(Warning::Busy)) => return "appkey: a background program is busy",
+            _ => {}
+        }
+    }
+    let _ = start;
+    "appkey settings"
+}
 
-/// `appkey memory [--alert | --busy]`. Returns `true` if the user snoozed the warning.
+/// Requests from other appkey processes to show the Processes tab (see
+/// `memory::window_signal`): a signal sets a flag, a thread wakes the UI to read it.
 #[cfg(target_os = "linux")]
-pub fn memory_window(mode: MemoryMode) -> Result<bool> {
-    pressure::run(mode)
+mod requests {
+    use std::sync::atomic::{AtomicU8, Ordering};
+    use std::time::Duration;
+
+    use crate::memory::{Warning, window_signal};
+
+    /// 0 = none, else 1 + the index in [`MODES`].
+    static PENDING: AtomicU8 = AtomicU8::new(0);
+    const MODES: [Option<Warning>; 3] = [None, Some(Warning::LowMemory), Some(Warning::Busy)];
+
+    extern "C" fn on_signal(sig: libc::c_int) {
+        // Only an atomic store: safe in a signal handler.
+        if let Some(i) = MODES.iter().position(|m| window_signal(*m) == sig) {
+            #[allow(clippy::cast_possible_truncation)]
+            PENDING.store(i as u8 + 1, Ordering::SeqCst);
+        }
+    }
+
+    /// Before the window opens, so a request sent right after we start isn't fatal (the
+    /// default action of these signals ends the process).
+    pub fn listen() {
+        for mode in MODES {
+            let handler = on_signal as extern "C" fn(libc::c_int) as libc::sighandler_t;
+            // SAFETY: the handler only does an atomic store, which is async-signal-safe.
+            unsafe { libc::signal(window_signal(mode), handler) };
+        }
+    }
+
+    pub fn wake_on_request(ctx: eframe::egui::Context) {
+        std::thread::spawn(move || {
+            loop {
+                std::thread::sleep(Duration::from_millis(200));
+                if PENDING.load(Ordering::SeqCst) != 0 {
+                    ctx.request_repaint();
+                }
+            }
+        });
+    }
+
+    /// The latest request, if one came since the last call.
+    #[allow(clippy::option_option)] // "no request" vs. "show it, without a warning"
+    pub fn take() -> Option<Option<Warning>> {
+        match PENDING.swap(0, Ordering::SeqCst) {
+            0 => None,
+            i => MODES.get(usize::from(i) - 1).copied(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,6 +152,8 @@ enum Tab {
     Shortcuts,
     #[cfg(target_os = "linux")]
     Memory,
+    #[cfg(target_os = "linux")]
+    Processes,
 }
 
 /// One editable shortcut (an [`Entry`] for this OS).
@@ -109,6 +204,10 @@ struct Settings {
     others: Vec<Entry>,
     memory_watch: MemoryWatch,
     saved_memory_watch: MemoryWatch,
+    memory_limit: MemoryLimit,
+    saved_memory_limit: MemoryLimit,
+    /// Whether the file has a `[memory_limit]` section.
+    had_memory_limit: bool,
     /// Saved as soon as it's picked, not with the Save button.
     theme: Option<Theme>,
     /// Whether the file has a `[memory_watch]` section (we don't add one for defaults).
@@ -116,6 +215,12 @@ struct Settings {
     /// `None` where the Memory tab isn't offered (not Ubuntu / Mint).
     #[cfg(target_os = "linux")]
     memory_tab: Option<memory::MemoryTab>,
+    /// Created the first time the Processes tab is shown.
+    #[cfg(target_os = "linux")]
+    processes: Option<processes::ProcessesTab>,
+    /// Opened for a warning (`appkey memory --alert`): Dismiss / Snooze close the window.
+    #[cfg(target_os = "linux")]
+    close_after_answer: bool,
     /// Set when the file couldn't be read; saving is disabled so we never clobber it.
     load_error: Option<String>,
     recording: Option<usize>,
@@ -139,6 +244,8 @@ impl Settings {
             Err(e) => (Document::default(), Some(format!("{e:#}"))),
         };
         let had_memory_watch = doc.memory_watch.is_some();
+        let had_memory_limit = doc.memory_limit.is_some();
+        let memory_limit = doc.memory_limit.unwrap_or_default();
         let theme = doc.theme;
         let memory_watch = doc.memory_watch.unwrap_or_default();
         let (here, others): (Vec<Entry>, Vec<Entry>) =
@@ -153,9 +260,16 @@ impl Settings {
             memory_watch,
             saved_memory_watch: memory_watch,
             had_memory_watch,
+            memory_limit,
+            saved_memory_limit: memory_limit,
+            had_memory_limit,
             theme,
             #[cfg(target_os = "linux")]
             memory_tab: crate::memory::available().then(memory::MemoryTab::new),
+            #[cfg(target_os = "linux")]
+            processes: None,
+            #[cfg(target_os = "linux")]
+            close_after_answer: false,
             load_error,
             recording: None,
             super_down: false,
@@ -170,7 +284,62 @@ impl Settings {
     }
 
     fn dirty(&self) -> bool {
-        self.rows != self.saved || self.memory_watch != self.saved_memory_watch
+        self.rows != self.saved
+            || self.memory_watch != self.saved_memory_watch
+            || self.memory_limit != self.saved_memory_limit
+    }
+
+    /// Switches to the Processes tab, showing this warning (or none).
+    #[cfg(target_os = "linux")]
+    fn show_processes(&mut self, mode: processes::Mode) {
+        if self.memory_tab.is_none() {
+            return;
+        }
+        match &mut self.processes {
+            Some(p) => p.set_mode(mode, self.saved_memory_watch),
+            None => {
+                self.processes = Some(processes::ProcessesTab::new(mode, self.saved_memory_watch));
+            }
+        }
+        self.tab = Tab::Processes;
+    }
+
+    /// A request from the daemon or a shortcut (see [`requests`]).
+    #[cfg(target_os = "linux")]
+    fn handle_request(&mut self, ctx: &egui::Context) {
+        let Some(mode) = requests::take() else { return };
+        self.show_processes(mode);
+        ctx.send_viewport_cmd(egui::ViewportCommand::Title(window_title(Some(mode)).into()));
+        if mode.is_some() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(
+                egui::WindowLevel::AlwaysOnTop,
+            ));
+            // The settings size is cramped for the table.
+            let size = ctx.input(|i| i.viewport().inner_rect.map(|r| r.size()));
+            if size.is_some_and(|s| s.x < 900.0 || s.y < 560.0) {
+                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(940.0, 620.0)));
+            }
+        }
+    }
+
+    /// Tells the daemon what the user did about a warning; the window stays (unless it
+    /// was opened just for it) and goes back to normal.
+    #[cfg(target_os = "linux")]
+    fn answer(&mut self, ctx: &egui::Context, answer: processes::Answer) {
+        let text = if answer == processes::Answer::Snooze { "snooze" } else { "dismiss" };
+        if let Err(e) = std::fs::write(crate::memory::alert_answer_path(), text) {
+            eprintln!("appkey: couldn't tell the daemon: {e}");
+        }
+        if let Some(p) = &mut self.processes {
+            p.set_mode(None, self.saved_memory_watch);
+        }
+        if self.close_after_answer {
+            self.close_after_answer = false;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
+        }
+        ctx.send_viewport_cmd(egui::ViewportCommand::Title(window_title(None).into()));
+        ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(egui::WindowLevel::Normal));
     }
 
     /// Per-row problem, if any. Saving is blocked while there are problems.
@@ -217,16 +386,19 @@ impl Settings {
         let mut shortcuts: Vec<Entry> = self.rows.iter().map(Row::to_entry).collect();
         let keep_watch = self.had_memory_watch || self.memory_watch != MemoryWatch::default();
         let memory_watch = keep_watch.then_some(self.memory_watch);
+        let keep_limit = self.had_memory_limit || self.memory_limit != MemoryLimit::default();
+        let memory_limit = keep_limit.then_some(self.memory_limit);
         let result = config::validate_document(Document {
             theme: self.theme,
             memory_watch,
+            memory_limit,
             shortcuts: shortcuts.clone(),
         })
         .and_then(|_| {
             shortcuts.extend(self.others.iter().cloned());
             config::save_document(
                 &self.path,
-                &Document { theme: self.theme, memory_watch, shortcuts },
+                &Document { theme: self.theme, memory_watch, memory_limit, shortcuts },
             )
         });
         match result {
@@ -234,6 +406,8 @@ impl Settings {
                 self.saved = self.rows.clone();
                 self.saved_memory_watch = self.memory_watch;
                 self.had_memory_watch = keep_watch;
+                self.saved_memory_limit = self.memory_limit;
+                self.had_memory_limit = keep_limit;
                 self.status =
                     Some(("Saved. appkey picks up the changes automatically.".into(), false));
                 true
@@ -338,6 +512,7 @@ impl Settings {
                 if ui.add_enabled(self.dirty(), Button::new("Revert")).clicked() {
                     self.rows.clone_from(&self.saved);
                     self.memory_watch = self.saved_memory_watch;
+                    self.memory_limit = self.saved_memory_limit;
                     self.recording = None;
                     self.status = None;
                 }
@@ -370,6 +545,49 @@ impl Settings {
                 }
             });
         });
+    }
+
+    #[cfg(target_os = "linux")]
+    fn tab_changed(&mut self, ctx: &egui::Context, before: Tab) {
+        if self.tab == before {
+            return;
+        }
+        if self.tab == Tab::Processes {
+            self.show_processes(None);
+        } else if self.processes.as_ref().is_some_and(|p| p.mode().is_some()) {
+            // Looked at it and moved on.
+            self.answer(ctx, processes::Answer::Dismiss);
+        }
+    }
+
+    /// `APPKEY_SCREENSHOT_SCENE`: what to show before the screenshot.
+    #[cfg(debug_assertions)]
+    fn devshot_scene(&mut self, ctx: &egui::Context) {
+        if let Some(shot) = &mut self.devshot {
+            if shot.scene == "picker" && self.picker.is_none() && !self.rows.is_empty() {
+                shot.scene.clear();
+                self.picker = Some((0, Picker::new(Some(&self.rows[0].app_info()))));
+            }
+            #[cfg(target_os = "linux")]
+            if shot.scene == "memory" && self.memory_tab.is_some() {
+                shot.scene.clear();
+                self.tab = Tab::Memory;
+            }
+            shot.tick(ctx);
+        }
+        #[cfg(target_os = "linux")]
+        if let Some(scene) = self.devshot.as_mut().map(|s| std::mem::take(&mut s.scene)) {
+            if matches!(scene.as_str(), "processes" | "cgroups") {
+                self.show_processes(None);
+                if scene == "cgroups"
+                    && let Some(p) = &mut self.processes
+                {
+                    p.show_cgroups();
+                }
+            } else if let Some(shot) = &mut self.devshot {
+                shot.scene = scene;
+            }
+        }
     }
 
     fn close(&mut self, ctx: &egui::Context) {
@@ -444,19 +662,10 @@ impl eframe::App for Settings {
         let super_down = self.super_down;
         let super_after = ctx.input(|i| keys::super_after(&i.events, super_down));
         #[cfg(debug_assertions)]
-        if let Some(shot) = &mut self.devshot {
-            if shot.scene == "picker" && self.picker.is_none() && !self.rows.is_empty() {
-                shot.scene.clear();
-                self.picker = Some((0, Picker::new(Some(&self.rows[0].app_info()))));
-            }
-            #[cfg(target_os = "linux")]
-            if shot.scene == "memory" && self.memory_tab.is_some() {
-                shot.scene.clear();
-                self.tab = Tab::Memory;
-            }
-            shot.tick(&ctx);
-        }
+        self.devshot_scene(&ctx);
         self.handle_close(&ctx);
+        #[cfg(target_os = "linux")]
+        self.handle_request(&ctx);
 
         if let Some((row, picker)) = &mut self.picker {
             match picker.show(&ctx) {
@@ -473,6 +682,8 @@ impl eframe::App for Settings {
             }
         }
 
+        #[cfg(target_os = "linux")]
+        let before = self.tab;
         egui::Panel::top("tabs").show(ui, |ui| {
             ui.add_space(4.0);
             ui.horizontal(|ui| {
@@ -480,6 +691,7 @@ impl eframe::App for Settings {
                 #[cfg(target_os = "linux")]
                 if self.memory_tab.is_some() {
                     ui.selectable_value(&mut self.tab, Tab::Memory, "Memory");
+                    ui.selectable_value(&mut self.tab, Tab::Processes, "Processes");
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if theme::picker(ui, &mut self.theme) {
@@ -490,8 +702,20 @@ impl eframe::App for Settings {
             });
             ui.add_space(2.0);
         });
+        #[cfg(target_os = "linux")]
+        self.tab_changed(&ctx, before);
         egui::Panel::bottom("actions").show(ui, |ui| {
             ui.add_space(6.0);
+            #[cfg(target_os = "linux")]
+            if self.tab == Tab::Processes
+                && let Some(p) = &mut self.processes
+            {
+                if let Some(answer) = p.footer(ui) {
+                    self.answer(ui.ctx(), answer);
+                }
+                ui.add_space(6.0);
+                return;
+            }
             self.bottom_bar(ui);
             ui.add_space(6.0);
         });
@@ -512,12 +736,26 @@ impl eframe::App for Settings {
                 Tab::Shortcuts => self.shortcuts_tab(ui),
                 #[cfg(target_os = "linux")]
                 Tab::Memory => {
-                    if let Some(tab) = &mut self.memory_tab {
-                        tab.show(ui, &mut self.memory_watch);
+                    if let Some(tab) = &mut self.memory_tab
+                        && tab.show(ui, &mut self.memory_watch, &mut self.memory_limit)
+                    {
+                        self.show_processes(None);
+                    }
+                }
+                #[cfg(target_os = "linux")]
+                Tab::Processes => {
+                    if let Some(p) = &mut self.processes {
+                        p.show(ui);
                     }
                 }
             }
         });
+        #[cfg(target_os = "linux")]
+        if let Some(p) = &mut self.processes
+            && self.tab == Tab::Processes
+        {
+            p.finish(&ctx);
+        }
         self.super_down = super_after;
     }
 }

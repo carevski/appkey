@@ -136,15 +136,16 @@ Combinations with two modifiers are the safest: <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+*
 
 ## Low memory and frozen desktops (Ubuntu, Linux Mint)
 
-On Ubuntu, Linux Mint and other Ubuntu-based systems, the settings window has a **Memory** tab with two tools.
+On Ubuntu, Linux Mint and other Ubuntu-based systems, the settings window has two more tabs: **Memory** (warnings, a memory limit, emergency keys) and **Processes**.
 
-**The memory window** shows what's running, grouped by app, so you can tell quickly what is what and close it:
+**The Processes tab** shows what's running, grouped by app, so you can tell quickly what is what and close it:
 
 - **One row per app, with everything it started** underneath (rows open expanded; click ▾ to fold one): Chrome with its tabs, GPU and network processes; IntelliJ IDEA (or PyCharm, WebStorm…) with its Kotlin daemon; a terminal tab with what runs in it, e.g. *Terminal: Claude Code* with its dev server.
 - **Names you recognise**: apps are labelled with their window titles (Chrome's open pages, IntelliJ's projects), programs without a window with the folder they run in. Hover a row for the full command, folder and process id.
 - **Memory, CPU and how long it has been running**, sortable by memory or CPU.
 - **Left running in the background**, listed first: programs with no window whose terminal, Claude session or IDE has already closed (old dev servers, Gradle daemons, scripts stuck in a loop). **Close all of these** clears them in one go.
 - **Show** brings an app's window to the front, so you can check before closing. **Close** asks a whole app to quit; **End** stops one process (for a Chrome tab: that tab shows "Aw, Snap!" and can be reloaded; which tab is which is only visible in Chrome's own Task Manager, <kbd>Shift</kbd>+<kbd>Esc</kbd>). If something doesn't quit within 5 seconds, **Force quit** appears.
+- **Group by cgroup** shows the same processes as a tree of the kernel's control groups instead: which systemd service, scope or slice each one runs in (apps started from the menu usually get their own `app-….scope`, snaps and Flatpaks theirs). Groups using 100 MB or more open expanded. Memory is what the kernel counts for the group, which includes file cache.
 - Memory and CPU keep updating, but while the mouse pointer is in the window the rows stay where they are, so a click always hits what you aimed at. A program that quits meanwhile shows "ended"; new ones appear when the pointer leaves.
 
 **Uninstall an app you no longer need**, without remembering how you installed it: click **Uninstall…** on its row. appkey works out how it was installed and removes it the matching way:
@@ -160,11 +161,24 @@ On Ubuntu, Linux Mint and other Ubuntu-based systems, the settings window has a 
 
 You always see what will be removed and the exact command first. appkey closes the app, then removes it. It refuses when an apt removal would take part of the desktop or the system with it (for example removing Nemo would also remove Cinnamon), or more than 15 packages: do those in your package manager if you're sure.
 
-Open it with **Show memory use now…**, `appkey memory`, or **its own shortcut**: in Shortcuts, add one and choose app → *appkey* → **Memory window**. appkey only offers your own programs, never parts of the desktop itself.
+Open it with **Show memory use now** on the Memory tab, `appkey memory`, or **its own shortcut**: in Shortcuts, add one and choose app → *appkey* → **Memory window**. If the settings window is already open, it switches to the tab instead of opening a second window. appkey only offers your own programs, never parts of the desktop itself.
 
-**Low-memory warning.** Tick *Warn me before the computer runs out of memory* and click **Save**. When free memory stays below the limit you set (10% by default), or programs keep waiting on memory (20% of the time by default), the memory window opens by itself. **Snooze for an hour** keeps the warning away for an hour; **Dismiss** for 5 minutes.
+**Low-memory warning.** Tick *Warn me before the computer runs out of memory* and click **Save**. When free memory stays below the limit you set (10% by default), or programs keep waiting on memory (20% of the time by default), the settings window opens (or comes forward) on the Processes tab, on top of other windows. **Snooze for an hour** keeps the warning away for an hour; **Dismiss**, or switching to another tab, for 5 minutes.
 
-**Busy background programs.** Tick *Also warn when a program left running in the background keeps the CPU busy* and pick how long (10 minutes by default). If such a program uses a whole CPU core for that long, the memory window opens with it at the top.
+**Busy background programs.** Tick *Also warn when a program left running in the background keeps the CPU busy* and pick how long (10 minutes by default). If such a program uses a whole CPU core for that long, the Processes tab opens with it at the top.
+
+**Memory limit for apps started by appkey.** Tick *Limit how much memory apps opened with appkey's shortcuts use together*, choose a share of RAM (70% by default) or a fixed size, and click **Save**. Every app appkey starts from then on, with everything it starts in turn (an IDE's Gradle and Kotlin daemons, a browser's tabs), shares that one limit. When they reach it, Linux makes them give memory back and slows them down, instead of the whole computer, so the desktop and appkey stay responsive and you can close something. Only if they keep growing, to halfway between the limit and all of your RAM, does Linux end the biggest of them. The tab shows how much they use now.
+
+- Not limited: apps you open from the menu or that were already running before you turned the limit on (open them again with the shortcut), and snaps and Flatpaks, which move themselves into their own group. *Group by cgroup* on the Processes tab shows what is inside the limit (`app-appkey.slice`).
+- Turning it off lifts the limit right away, and apps start normally again, as before.
+- It needs systemd with cgroup v2 (Ubuntu 22.04 / Mint 21 and later). If starting an app through it fails, appkey starts the app normally, without the limit. If the limit itself can't be set, the tray says why.
+- In the config file:
+
+  ```toml
+  [memory_limit]
+  enabled = true
+  limit = "70%"      # or e.g. "12 GB"; 10–95%, at least 1 GB
+  ```
 
 **Emergency keys (Magic SysRq).** If the computer freezes before you can react, these keys still work because the Linux kernel handles them, not the desktop. Hold <kbd>Alt</kbd> and <kbd>PrtSc</kbd> (SysRq), then press:
 
@@ -199,7 +213,7 @@ appkey also has a few terminal commands. They're optional, but useful for setup 
 | `appkey list` | Show open apps and the names to use for `app` |
 | `appkey check` | Check your config for mistakes and show notes for your system |
 | `appkey open firefox` | Do exactly what a shortcut for `firefox` would do, once |
-| `appkey memory` | Show what's running, grouped by app, and close it (Ubuntu, Mint) |
+| `appkey memory` | Open settings on Processes: what's running, by app or cgroup, and close it (Ubuntu, Mint) |
 | `appkey config` | Show where the config file is |
 
 On Windows, tick **Add appkey to PATH** in the installer to use these from a terminal.
@@ -210,7 +224,7 @@ On Windows, tick **Add appkey to PATH** in the installer to use these from a ter
 
 - appkey needs **no special permissions** on any system. It doesn't read your keystrokes: it asks the system to tell it when *your* shortcuts are pressed.
 - It never runs commands through a shell. `launch` starts exactly the program you list.
-- **Linux:** the memory window can only close your own programs, and it never runs as administrator. Changing the SysRq setting and uninstalling a snap or .deb are the only things that need administrator rights: your system's own password prompt asks for it, and only for writing that one setting.
+- **Linux:** the Processes tab can only close your own programs, and it never runs as administrator. Changing the SysRq setting and uninstalling a snap or .deb are the only things that need administrator rights: your system's own password prompt asks for it, and only for writing that one setting.
 - Your config decides which programs run, so on macOS and Linux appkey refuses to use it if other users on the computer could edit it.
 - **Windows:** an app running *as administrator* can only be brought to the front if appkey also runs as administrator. appkey tells you when this happens rather than working around Windows' protection.
 

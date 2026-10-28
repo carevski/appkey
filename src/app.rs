@@ -64,6 +64,11 @@ pub struct App {
     memory_watch: config::MemoryWatch,
     #[cfg(target_os = "linux")]
     memory: crate::memory::Watcher,
+    /// The `[memory_limit]` last set on the slice, and why setting it failed.
+    #[cfg(target_os = "linux")]
+    applied_limit: Option<config::MemoryLimit>,
+    #[cfg(target_os = "linux")]
+    limit_error: Option<String>,
 }
 
 impl std::fmt::Debug for App {
@@ -128,6 +133,10 @@ impl App {
             #[cfg(target_os = "linux")]
             memory_watch: config::MemoryWatch::default(),
             #[cfg(target_os = "linux")]
+            applied_limit: None,
+            #[cfg(target_os = "linux")]
+            limit_error: None,
+            #[cfg(target_os = "linux")]
             memory: crate::memory::Watcher::default(),
         };
         app.reload();
@@ -183,6 +192,12 @@ impl App {
             let _ = platform::focus_pid(child.id());
             return;
         }
+        // Opened another way (`appkey memory`, a warning).
+        #[cfg(target_os = "linux")]
+        if let Some(p) = crate::memory::find_window() {
+            let _ = platform::focus_pid(p.pid);
+            return;
+        }
         let spawned = std::env::current_exe()
             .and_then(|exe| std::process::Command::new(exe).arg("settings").spawn());
         match spawned {
@@ -200,6 +215,13 @@ impl App {
         #[cfg(target_os = "linux")]
         {
             self.memory_watch = cfg.as_ref().map(|c| c.memory_watch).unwrap_or_default();
+            let limit = cfg.as_ref().map(|c| c.memory_limit).unwrap_or_default();
+            crate::memory::use_limit(limit);
+            if self.applied_limit != Some(limit) {
+                self.limit_error =
+                    crate::memory::apply_limit(limit).err().map(|e| format!("{e:#}"));
+                self.applied_limit = self.limit_error.is_none().then_some(limit);
+            }
         }
 
         let Some(hotkeys) = self.hotkeys.as_mut() else {
@@ -224,6 +246,11 @@ impl App {
     }
 
     fn set_status(&mut self, msg: &str) {
+        #[cfg(target_os = "linux")]
+        let msg = &match &self.limit_error {
+            Some(e) => format!("{msg}; memory limit not set: {e}"),
+            None => msg.to_owned(),
+        };
         log(msg);
         let first_line = msg.lines().next().unwrap_or_default();
         self.status.set_text(first_line);

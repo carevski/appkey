@@ -29,6 +29,8 @@ pub struct Proc {
     pub cwd: Option<String>,
     /// Runs in a systemd `.service` (started on purpose, managed by systemd).
     pub service: bool,
+    /// Its cgroup v2 path (only for the user's own processes).
+    pub cgroup: String,
 }
 
 /// The fields of `/proc/<pid>/stat` we need.

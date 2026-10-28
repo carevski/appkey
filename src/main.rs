@@ -27,7 +27,7 @@ COMMANDS:
     check         Validate the config and show platform notes
     list          Show running apps and the names to use as `app` in the config
     open <app>    Focus or launch <app> once, exactly like a shortcut would
-    memory        Show the programs using the most memory, and close them (Ubuntu/Mint)
+    memory        Open settings on Processes: what uses memory, and close it (Ubuntu/Mint)
     config        Print the config file path
     help          Show this help
     version       Show the version
@@ -60,10 +60,10 @@ fn cli(args: &[String]) -> Result<()> {
         }
         ["open", app] => open(&path, app),
         ["settings"] => ui::run(path),
-        ["memory"] => memory_window(None),
+        ["memory"] => memory_window(path, None),
         // Opened by the daemon when memory runs low / a background program is busy
         // (see memory::Watcher).
-        ["memory", flag @ ("--alert" | "--busy")] => memory_window(Some(flag)),
+        ["memory", flag @ ("--alert" | "--busy")] => memory_window(path, Some(flag)),
         // Run by desktops that execute a command per shortcut (Hyprland binds).
         ["__hotkey", id] => run_hotkey(&path, id),
         // Test helper (undocumented): the id desktops know a shortcut by.
@@ -104,20 +104,14 @@ fn check(path: &Path) -> Result<()> {
 }
 
 #[cfg(target_os = "linux")]
-fn memory_window(flag: Option<&str>) -> Result<()> {
-    let mode = match flag {
-        Some("--alert") => ui::MemoryMode::LowMemory,
-        Some(_) => ui::MemoryMode::Busy,
-        None => ui::MemoryMode::Manual,
-    };
-    if ui::memory_window(mode)? {
-        std::process::exit(memory::SNOOZE_EXIT);
-    }
-    Ok(())
+fn memory_window(path: std::path::PathBuf, flag: Option<&str>) -> Result<()> {
+    let warning = flag
+        .map(|f| if f == "--alert" { memory::Warning::LowMemory } else { memory::Warning::Busy });
+    ui::memory_window(path, warning)
 }
 
 #[cfg(not(target_os = "linux"))]
-fn memory_window(_flag: Option<&str>) -> Result<()> {
+fn memory_window(_path: std::path::PathBuf, _flag: Option<&str>) -> Result<()> {
     bail!("`appkey memory` is only available on Ubuntu and Linux Mint")
 }
 
@@ -139,6 +133,8 @@ pub(crate) fn perform(app: &str, launch: Option<&[String]>) -> Result<platform::
 fn run_hotkey(path: &Path, id: &str) -> Result<()> {
     let id: u32 = id.parse()?;
     let cfg = config::load_or_init(path)?;
+    #[cfg(target_os = "linux")]
+    memory::use_limit(cfg.memory_limit);
     let Some(s) = cfg.shortcuts.iter().find(|s| s.hotkey.id() == id) else {
         bail!("no shortcut with id {id} in the config");
     };
@@ -148,8 +144,10 @@ fn run_hotkey(path: &Path, id: &str) -> Result<()> {
 
 /// Uses the config's `launch` for this app if there is one, so `open` behaves like the hotkey.
 fn open(path: &Path, app: &str) -> Result<()> {
-    let launch = config::load_or_init(path)
-        .ok()
+    let cfg = config::load_or_init(path).ok();
+    #[cfg(target_os = "linux")]
+    memory::use_limit(cfg.as_ref().map(|c| c.memory_limit).unwrap_or_default());
+    let launch = cfg
         .and_then(|c| c.shortcuts.into_iter().find(|s| matcher::matches(app, &s.app)))
         .and_then(|s| s.launch);
     let outcome = perform(app, launch.as_deref())?;

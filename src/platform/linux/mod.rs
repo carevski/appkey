@@ -209,9 +209,11 @@ pub fn focus_or_launch(app: &str, launch: Option<&[String]>) -> Result<Outcome> 
         ws.activate(&w)?;
         return Ok(Outcome::Focused);
     }
-    match launch {
-        Some(argv) => spawn(argv)?,
-        None => spawn(&[app.to_owned()])?,
+    let argv = launch.map_or_else(|| vec![app.to_owned()], <[String]>::to_vec);
+    if crate::memory::launch_capped() {
+        crate::memory::spawn_capped(&argv, app)?;
+    } else {
+        spawn(&argv)?;
     }
     Ok(Outcome::Launched)
 }

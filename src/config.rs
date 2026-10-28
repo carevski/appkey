@@ -19,6 +19,8 @@ pub struct Document {
     pub theme: Option<Theme>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory_watch: Option<MemoryWatch>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_limit: Option<MemoryLimit>,
     #[serde(default, rename = "shortcut")]
     pub shortcuts: Vec<Entry>,
 }
@@ -88,6 +90,101 @@ impl MemoryWatch {
     }
 }
 
+/// `[memory_limit]`: apps started by appkey's shortcuts share one memory cap, so they
+/// can't take the whole machine (Ubuntu / Linux Mint; kept but ignored elsewhere).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct MemoryLimit {
+    pub enabled: bool,
+    /// `"70%"` of RAM, or a size such as `"12 GB"` or `"8192 MB"`.
+    pub limit: LimitSize,
+}
+
+impl Default for MemoryLimit {
+    fn default() -> Self {
+        Self { enabled: false, limit: LimitSize::Percent(70) }
+    }
+}
+
+impl MemoryLimit {
+    pub const PERCENT_RANGE: std::ops::RangeInclusive<u8> = 10..=95;
+    /// Smallest fixed cap, in MiB: less wouldn't fit one browser.
+    pub const MIN_MIB: u64 = 1024;
+
+    pub fn validate(self) -> Result<()> {
+        match self.limit {
+            LimitSize::Percent(p) if !Self::PERCENT_RANGE.contains(&p) => bail!(
+                "memory_limit: limit must be between {}% and {}% of RAM",
+                Self::PERCENT_RANGE.start(),
+                Self::PERCENT_RANGE.end()
+            ),
+            LimitSize::Mib(m) if m < Self::MIN_MIB => {
+                bail!("memory_limit: limit must be at least {} MB", Self::MIN_MIB)
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
+/// A share of RAM or a fixed size. Written as `"70%"`, `"12 GB"`, `"1.5 GB"`, `"8192 MB"`
+/// (binary units, like the sizes appkey shows).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(try_from = "String", into = "String")]
+pub enum LimitSize {
+    Percent(u8),
+    Mib(u64),
+}
+
+impl LimitSize {
+    /// The size in bytes on a machine with `total` bytes of RAM.
+    pub fn bytes(self, total: u64) -> u64 {
+        match self {
+            Self::Percent(p) => total / 100 * u64::from(p),
+            Self::Mib(m) => m.saturating_mul(1024 * 1024),
+        }
+    }
+}
+
+impl TryFrom<String> for LimitSize {
+    type Error = String;
+
+    fn try_from(s: String) -> Result<Self, String> {
+        let bad = || format!("memory_limit: {s:?} isn't a size; write e.g. \"70%\" or \"12 GB\"");
+        let t = s.trim();
+        if let Some(p) = t.strip_suffix('%') {
+            return p.trim().parse().map(Self::Percent).map_err(|_| bad());
+        }
+        let split = t.find(|c: char| !(c.is_ascii_digit() || c == '.')).unwrap_or(t.len());
+        let (num, unit) = t.split_at(split);
+        let num: f64 = num.parse().map_err(|_| bad())?;
+        let factor = match unit.trim().to_ascii_lowercase().as_str() {
+            "g" | "gb" | "gib" => 1024.0,
+            "m" | "mb" | "mib" => 1.0,
+            _ => return Err(bad()),
+        };
+        let mib = (num * factor).round();
+        if !(0.0..1e12).contains(&mib) {
+            return Err(bad());
+        }
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        Ok(Self::Mib(mib as u64))
+    }
+}
+
+impl From<LimitSize> for String {
+    fn from(l: LimitSize) -> Self {
+        match l {
+            LimitSize::Percent(p) => format!("{p}%"),
+            LimitSize::Mib(m) if m % 1024 == 0 => format!("{} GB", m / 1024),
+            LimitSize::Mib(m) if (m * 10) % 1024 == 0 => {
+                let tenths = m * 10 / 1024;
+                format!("{}.{} GB", tenths / 10, tenths % 10)
+            }
+            LimitSize::Mib(m) => format!("{m} MB"),
+        }
+    }
+}
+
 /// The `app` of a shortcut that opens appkey's memory window (Ubuntu / Linux Mint).
 pub const MEMORY_ACTION: &str = "appkey:memory";
 
@@ -131,6 +228,8 @@ pub struct Config {
     pub shortcuts: Vec<Shortcut>,
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub memory_watch: MemoryWatch,
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub memory_limit: MemoryLimit,
 }
 
 pub const CURRENT_OS: &str = std::env::consts::OS;
@@ -188,7 +287,9 @@ fn parse(text: &str) -> Result<Config> {
 pub fn validate_document(doc: Document) -> Result<Config> {
     let memory_watch = doc.memory_watch.unwrap_or_default();
     memory_watch.validate()?;
-    Ok(Config { memory_watch, ..validate(doc.shortcuts)? })
+    let memory_limit = doc.memory_limit.unwrap_or_default();
+    memory_limit.validate()?;
+    Ok(Config { memory_watch, memory_limit, ..validate(doc.shortcuts)? })
 }
 
 /// Checks entries for the current OS and turns them into registrable shortcuts.
@@ -219,7 +320,7 @@ pub fn validate(entries: Vec<Entry>) -> Result<Config> {
         }
         shortcuts.push(Shortcut { hotkey, keys: s.keys, app: s.app, launch: s.launch });
     }
-    Ok(Config { shortcuts, memory_watch: MemoryWatch::default() })
+    Ok(Config { shortcuts, ..Config::default() })
 }
 
 /// The config decides which programs we execute, so on Unix refuse a file that
@@ -367,6 +468,36 @@ mod tests {
     }
 
     #[test]
+    fn memory_limit_sizes() {
+        assert_eq!(parse("").unwrap().memory_limit, MemoryLimit::default());
+        let size = |t: &str| LimitSize::try_from(t.to_owned());
+        assert_eq!(size("70%"), Ok(LimitSize::Percent(70)));
+        assert_eq!(size(" 12 GB"), Ok(LimitSize::Mib(12 * 1024)));
+        assert_eq!(size("1.5G"), Ok(LimitSize::Mib(1536)));
+        assert_eq!(size("8192 MiB"), Ok(LimitSize::Mib(8192)));
+        for bad in ["", "%", "12", "12 TB", "-1 GB", "lots"] {
+            assert!(size(bad).is_err(), "{bad:?}");
+        }
+        for (l, text) in [
+            (LimitSize::Percent(70), "70%"),
+            (LimitSize::Mib(12 * 1024), "12 GB"),
+            (LimitSize::Mib(1536), "1.5 GB"),
+            (LimitSize::Mib(1500), "1500 MB"),
+        ] {
+            assert_eq!(String::from(l), text);
+            assert_eq!(size(text), Ok(l));
+        }
+        assert_eq!(LimitSize::Percent(50).bytes(1000), 500);
+        assert_eq!(LimitSize::Mib(2).bytes(1), 2 << 20);
+
+        let cfg = parse("[memory_limit]\nenabled = true\nlimit = \"6 GB\"").unwrap();
+        assert_eq!(cfg.memory_limit, MemoryLimit { enabled: true, limit: LimitSize::Mib(6144) });
+        assert!(parse("[memory_limit]\nlimit = \"5%\"").is_err());
+        assert!(parse("[memory_limit]\nlimit = \"512 MB\"").is_err());
+        assert!(parse("[memory_limit]\nlimit = 70").is_err());
+    }
+
+    #[test]
     fn parses_launch_and_keys() {
         let cfg = parse(
             "[[shortcut]]\nkeys = \"ctrl+alt+t\"\napp = \"term\"\nlaunch = [\"term\", \"--new\"]",
@@ -402,6 +533,7 @@ mod tests {
             theme: Some(Theme::Light),
             shortcuts: entries,
             memory_watch: Some(MemoryWatch { enabled: true, ..MemoryWatch::default() }),
+            memory_limit: Some(MemoryLimit { enabled: true, limit: LimitSize::Mib(1536) }),
         };
         save_document(&path, &doc).unwrap();
         assert_eq!(read_document(&path).unwrap(), doc);

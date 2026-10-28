@@ -8,6 +8,7 @@
 //! and we never elevate. Parsers are platform-neutral and unit-tested on every
 //! host; reading `/proc` and signalling are Linux-only.
 
+pub mod cgroup;
 pub mod procs;
 pub mod sysrq;
 pub mod uninstall;
@@ -239,9 +240,6 @@ mod linux {
     use super::{BusyTracker, Debounce, Snapshot, parse_meminfo, parse_pressure};
     use crate::config::MemoryWatch;
 
-    /// Exit code of `appkey memory --alert` when the user chose "Snooze for an hour".
-    pub const SNOOZE_EXIT: i32 = 3;
-
     /// Ubuntu, Linux Mint and other Ubuntu derivatives.
     pub fn available() -> bool {
         ["/etc/os-release", "/usr/lib/os-release"]
@@ -285,8 +283,10 @@ mod linux {
                 procs::parse_cmdline(&fs::read(format!("{dir}/cmdline")).unwrap_or_default());
             p.cwd =
                 fs::read_link(format!("{dir}/cwd")).ok().map(|c| c.to_string_lossy().into_owned());
-            p.service =
-                fs::read_to_string(format!("{dir}/cgroup")).is_ok_and(|c| procs::is_service(&c));
+            if let Ok(c) = fs::read_to_string(format!("{dir}/cgroup")) {
+                p.service = procs::is_service(&c);
+                p.cgroup = super::cgroup::parse_proc_cgroup(&c).unwrap_or_default();
+            }
         }
         Some(p)
     }
@@ -327,18 +327,54 @@ mod linux {
             .count()
     }
 
-    /// Which warning a dialog shows.
+    /// Which warning the Processes tab shows.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    enum Warning {
+    pub enum Warning {
         LowMemory,
         Busy,
+    }
+
+    /// Asks an open settings window to show its Processes tab: `None` as opened by hand,
+    /// or with this warning. A signal, so the window needn't poll anything.
+    pub fn window_signal(warning: Option<Warning>) -> libc::c_int {
+        match warning {
+            None => libc::SIGUSR1,
+            Some(Warning::LowMemory) => libc::SIGUSR2,
+            Some(Warning::Busy) => libc::SIGRTMIN() + 2,
+        }
+    }
+
+    /// Where the settings window says the user dismissed (`dismiss`) or snoozed
+    /// (`snooze`) a warning, for the daemon to read.
+    pub fn alert_answer_path() -> std::path::PathBuf {
+        let dir = std::env::var_os("XDG_RUNTIME_DIR")
+            .map_or_else(std::env::temp_dir, std::path::PathBuf::from);
+        dir.join(format!("appkey-{}-alert", current_uid()))
     }
 
     /// Background CPU use is sampled every this many ticks (seconds).
     const BUSY_SAMPLE_TICKS: u32 = 10;
 
+    /// The settings window showing a warning: one we started, or one that was open.
+    #[derive(Debug)]
+    enum Shown {
+        Child(Child),
+        Open { pid: u32, start: u64 },
+    }
+
+    impl Shown {
+        fn running(&mut self) -> bool {
+            match self {
+                Self::Child(c) => matches!(c.try_wait(), Ok(None)),
+                Self::Open { pid, start } => {
+                    read_proc(*pid, u32::MAX).is_some_and(|p| p.start_ticks == *start)
+                }
+            }
+        }
+    }
+
     /// Daemon side: checks memory every tick (and background CPU use every 10) and opens
-    /// the warning dialog.
+    /// the warning in the settings window's Processes tab.
     #[derive(Debug)]
     pub struct Watcher {
         supported: bool,
@@ -346,7 +382,7 @@ mod linux {
         busy_debounce: Debounce,
         busy: BusyTracker,
         ticks: u32,
-        dialog: Option<(Child, Warning)>,
+        dialog: Option<(Shown, Warning)>,
     }
 
     impl Default for Watcher {
@@ -368,12 +404,14 @@ mod linux {
                 return Ok(());
             }
             let now = Instant::now();
-            if let Some((child, kind)) = &mut self.dialog {
-                let snoozed = match child.try_wait() {
-                    Ok(None) => return Ok(()),
-                    Ok(Some(status)) => status.code() == Some(SNOOZE_EXIT),
-                    Err(_) => false,
-                };
+            if let Some((shown, kind)) = &mut self.dialog {
+                // Answered in the window (which may stay open), or the window closed.
+                let answer = fs::read_to_string(alert_answer_path()).ok();
+                if answer.is_none() && shown.running() {
+                    return Ok(());
+                }
+                let _ = fs::remove_file(alert_answer_path());
+                let snoozed = answer.is_some_and(|a| a.trim() == "snooze");
                 match kind {
                     Warning::LowMemory => self.debounce.closed(now, snoozed),
                     Warning::Busy => self.busy_debounce.closed(now, snoozed),
@@ -433,12 +471,21 @@ mod linux {
         }
 
         fn open(&mut self, kind: Warning, now: Instant) -> Result<()> {
-            let flag = if kind == Warning::Busy { "--busy" } else { "--alert" };
-            let spawned = std::env::current_exe()
-                .and_then(|exe| Command::new(exe).args(["memory", flag]).spawn());
-            match spawned {
-                Ok(child) => {
-                    self.dialog = Some((child, kind));
+            let _ = fs::remove_file(alert_answer_path());
+            let shown = match find_window() {
+                Some(p) if signal_window(&p, Some(kind)) => {
+                    Ok(Shown::Open { pid: p.pid, start: p.start_ticks })
+                }
+                _ => {
+                    let flag = if kind == Warning::Busy { "--busy" } else { "--alert" };
+                    std::env::current_exe()
+                        .and_then(|exe| Command::new(exe).args(["memory", flag]).spawn())
+                        .map(Shown::Child)
+                }
+            };
+            match shown {
+                Ok(shown) => {
+                    self.dialog = Some((shown, kind));
                     Ok(())
                 }
                 Err(e) => {
@@ -446,30 +493,194 @@ mod linux {
                         Warning::LowMemory => self.debounce.closed(now, false),
                         Warning::Busy => self.busy_debounce.closed(now, false),
                     }
-                    Err(e).context("couldn't open appkey's memory window")
+                    Err(e).context("couldn't open appkey's settings window")
                 }
             }
         }
     }
 
-    /// Brings an open memory window to the front, or opens one (shortcut, settings tab).
-    pub fn show_window() -> Result<()> {
-        let open = read_procs().into_iter().find(|p| {
+    /// An open settings window (`appkey settings` or `appkey memory …`) of ours.
+    pub fn find_window() -> Option<Proc> {
+        read_procs().into_iter().find(|p| {
             p.pid != std::process::id()
-                && p.cmdline.get(1).is_some_and(|a| a == "memory")
+                && p.uid == current_uid()
+                && p.cmdline.get(1).is_some_and(|a| a == "settings" || a == "memory")
                 && p.cmdline.first().is_some_and(|a| a.ends_with("appkey"))
-        });
-        if let Some(p) = open
-            && matches!(crate::platform::focus_pid(p.pid), Ok(true))
+        })
+    }
+
+    /// Switches an open settings window to its Processes tab and brings it forward.
+    fn signal_window(p: &Proc, warning: Option<Warning>) -> bool {
+        let Ok(pid) = libc::pid_t::try_from(p.pid) else { return false };
+        // SAFETY: kill only sends a signal; the kernel checks we may signal this pid.
+        if unsafe { libc::kill(pid, window_signal(warning)) } != 0 {
+            return false;
+        }
+        // A warning stays on top without taking the keyboard; by hand, bring it forward.
+        if warning.is_none() {
+            let _ = crate::platform::focus_pid(p.pid);
+        }
+        true
+    }
+
+    /// The Processes tab, in the open settings window or a new one (shortcut, tray).
+    pub fn show_window() -> Result<()> {
+        if let Some(p) = find_window()
+            && signal_window(&p, None)
         {
             return Ok(());
         }
-        open_window()
-    }
-
-    fn open_window() -> Result<()> {
         let exe = std::env::current_exe()?;
         crate::platform::spawn(&[exe.to_string_lossy().into_owned(), "memory".into()])
+    }
+
+    /// What the settings window shows about a cgroup.
+    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+    pub struct CgroupMemory {
+        /// Bytes in use (`memory.current`), when the memory controller is on for it.
+        pub current: Option<u64>,
+        pub high: Option<u64>,
+        pub max: Option<u64>,
+    }
+
+    /// Where cgroup v2 is mounted: `/sys/fs/cgroup`, or `…/unified` on hybrid systems.
+    fn cgroup_root() -> &'static str {
+        static ROOT: std::sync::OnceLock<&str> = std::sync::OnceLock::new();
+        ROOT.get_or_init(|| {
+            if std::path::Path::new("/sys/fs/cgroup/cgroup.controllers").exists() {
+                "/sys/fs/cgroup"
+            } else {
+                "/sys/fs/cgroup/unified"
+            }
+        })
+    }
+
+    pub fn read_cgroup_memory(path: &str) -> CgroupMemory {
+        let read = |file: &str| fs::read_to_string(format!("{}{path}/{file}", cgroup_root())).ok();
+        CgroupMemory {
+            current: read("memory.current").and_then(|t| t.trim().parse().ok()),
+            high: read("memory.high").and_then(|t| super::cgroup::parse_limit(&t)),
+            max: read("memory.max").and_then(|t| super::cgroup::parse_limit(&t)),
+        }
+    }
+
+    /// The slice for capped apps, if the user's systemd has created it.
+    pub fn cap_cgroup() -> Option<String> {
+        let path = format!(
+            "/user.slice/user-{uid}.slice/user@{uid}.service/app.slice/{}",
+            super::cgroup::SLICE,
+            uid = current_uid()
+        );
+        std::path::Path::new(&format!("{}{path}", cgroup_root())).is_dir().then_some(path)
+    }
+
+    /// Whether apps this process launches go into the shared cap (set from the config).
+    static CAPPED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+    /// Uses `[memory_limit]` for apps this process launches.
+    pub fn use_limit(limit: crate::config::MemoryLimit) {
+        CAPPED.store(limit.enabled && available(), std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn launch_capped() -> bool {
+        CAPPED.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Daemon side: sets the shared cap on the slice through the user's systemd, or lifts
+    /// it. Apps already in it keep running either way.
+    pub fn apply_limit(limit: crate::config::MemoryLimit) -> Result<()> {
+        let cap = if limit.enabled && available() {
+            let total =
+                read_snapshot().context("couldn't read /proc/meminfo")?.mem.total_kib * 1024;
+            Some(super::cgroup::cap_properties(limit.limit.bytes(total), total))
+        } else if cap_cgroup().is_some() {
+            None
+        } else {
+            return Ok(()); // never used: nothing to lift
+        };
+        let argv = super::cgroup::set_property_argv(cap);
+        let out = Command::new(&argv[0])
+            .args(&argv[1..])
+            .stdin(std::process::Stdio::null())
+            .output()
+            .context("couldn't run systemctl to set the memory cap")?;
+        if !out.status.success() {
+            anyhow::bail!(
+                "couldn't set the memory cap: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+        Ok(())
+    }
+
+    /// Starts `argv` through the user's systemd in the capped slice. Falls back to
+    /// starting it directly (uncapped) when systemd can't, so the shortcut still works.
+    pub fn spawn_capped(argv: &[String], app: &str) -> Result<()> {
+        let (program, rest) = argv.split_first().context("empty command")?;
+        // systemd searches its own PATH, not ours: hand it the full path.
+        let Some(exe) = find_program(program) else {
+            anyhow::bail!("starting {program:?}: not found");
+        };
+        let env: Vec<String> =
+            std::env::vars_os().filter_map(|(k, _)| k.into_string().ok()).collect();
+        let unit = super::cgroup::unit_name(app, random());
+        let run = super::cgroup::run_argv(
+            &unit,
+            &format!("{app} (started by appkey)"),
+            &exe.to_string_lossy(),
+            rest,
+            &env,
+            systemd_version().is_some_and(|v| v >= 250),
+        );
+        let started = Command::new(&run[0])
+            .args(&run[1..])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .output();
+        match started {
+            Ok(out) if out.status.success() => Ok(()),
+            other => {
+                let why = match other {
+                    Ok(out) => String::from_utf8_lossy(&out.stderr).trim().to_owned(),
+                    Err(e) => e.to_string(),
+                };
+                eprintln!(
+                    "appkey: couldn't start {app} in the memory cap ({why}); starting it uncapped"
+                );
+                crate::platform::spawn(argv)
+            }
+        }
+    }
+
+    fn systemd_version() -> Option<u32> {
+        static VERSION: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
+        *VERSION.get_or_init(|| {
+            let out = Command::new("/usr/bin/systemctl").arg("--version").output().ok()?;
+            super::cgroup::parse_systemd_version(&String::from_utf8_lossy(&out.stdout))
+        })
+    }
+
+    /// `program` itself if it's a path, else the first executable of that name on `PATH`.
+    fn find_program(program: &str) -> Option<std::path::PathBuf> {
+        use std::os::unix::fs::PermissionsExt;
+        let executable = |p: &std::path::Path| {
+            fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        };
+        if program.contains('/') {
+            let p = std::path::PathBuf::from(program);
+            return executable(&p).then(|| fs::canonicalize(&p).unwrap_or(p));
+        }
+        std::env::split_paths(&std::env::var_os("PATH")?)
+            .map(|d| d.join(program))
+            .find(|p| executable(p))
+    }
+
+    /// Enough to keep unit names apart.
+    fn random() -> u32 {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.subsec_nanos());
+        nanos ^ std::process::id().rotate_left(16)
     }
 }
 

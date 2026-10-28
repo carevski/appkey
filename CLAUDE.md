@@ -12,7 +12,7 @@ Tiny cross-platform (macOS, Windows, Linux/X11) tray app: a global shortcut open
 - Size check: `cargo build --release && ls -lh target/release/appkey`
 - Linux end-to-end on Xvfb + Openbox, both in CI and in `/verify`: `scripts/test-x11.sh <binary>` (focus behaviour), `scripts/test-settings-ui.sh <binary>` (record shortcut → save → daemon reload → shortcut works)
 - Wayland e2e (containers; see `/verify` and docs/DESIGN.md "Testing Wayland"): `scripts/wayland/test-{gnome,kde,hyprland}.sh`
-- See the settings window without screen-recording permission (debug builds): `APPKEY_SCREENSHOT=/tmp/s.png cargo run -- settings`, add `APPKEY_SCREENSHOT_SCENE=picker` for the app picker, `=memory` for the Memory tab (Linux). `APPKEY_SCREENSHOT=/tmp/m.png cargo run -- memory` for the memory window (add `APPKEY_SCREENSHOT_WAIT=4` so CPU % is sampled first). Then Read the PNG. Do this after any UI change.
+- See the settings window without screen-recording permission (debug builds): `APPKEY_SCREENSHOT=/tmp/s.png cargo run -- settings`, add `APPKEY_SCREENSHOT_SCENE=picker` for the app picker, `=memory` for the Memory tab, `=processes` / `=cgroups` for the Processes tab (Linux; add `APPKEY_SCREENSHOT_WAIT=4` so CPU % is sampled first). Then Read the PNG. Do this after any UI change.
 
 ## Releases
 
@@ -29,7 +29,7 @@ Every push to `main` runs `.github/workflows/release.yml`: CI → installers on 
 - `src/matcher.rs`: how a configured `app` name is compared to what the OS reports
 - `src/platform/{macos,windows}.rs`, `src/platform/linux/`: one backend per OS, **same public functions in each** (listed in `platform/mod.rs`). `desktop_entry.rs` / `lnk.rs` are pure parsers compiled for tests on every host.
 - `src/platform/linux/`: `mod.rs` picks a backend per session/desktop. `x11.rs`, `gnome.rs` (+ `packaging/gnome-extension/`), `kde.rs`, `hyprland.rs` implement `WindowSystem`. `cinnamon.rs` = Super shortcuts as Cinnamon custom keybindings (X11 windows otherwise). `reserved.rs` = combos Cinnamon/GNOME use themselves (read from GSettings; flagged in settings, reported unavailable by the daemon). `portal.rs` = GlobalShortcuts portal, `xkb.rs` = key syntax conversions. See the table in docs/DESIGN.md.
-- `src/memory/`: Ubuntu/Mint only: low-memory detection (`/proc/meminfo`, PSI), busy-background-CPU tracking, signalling the user's processes, Magic SysRq (`sysrq.rs`). `procs.rs` = process tree → apps, labels (Chrome tabs, IntelliJ, Claude Code…), "left running" detection. `uninstall.rs` = how an app was installed (snap, Flatpak, .deb, AppImage) and removing it. Parsers compile on every host for tests. UI: `ui/memory.rs` (settings tab), `ui/pressure.rs` (`appkey memory [--alert]` window)
+- `src/memory/`: Ubuntu/Mint only: low-memory detection (`/proc/meminfo`, PSI), busy-background-CPU tracking, signalling the user's processes, Magic SysRq (`sysrq.rs`). `procs.rs` = process tree → apps, labels (Chrome tabs, IntelliJ, Claude Code…), "left running" detection. `uninstall.rs` = how an app was installed (snap, Flatpak, .deb, AppImage) and removing it. Parsers compile on every host for tests. `cgroup.rs` = cgroup tree and the shared memory cap (`systemd-run` into `app-appkey.slice`). UI: `ui/memory.rs` (Memory tab), `ui/processes.rs` (Processes tab; `appkey memory [--alert|--busy]` opens settings on it)
 - `src/hotkeys.rs`: `Hotkeys` trait; global-hotkey on macOS/Windows/X11, desktop-specific ones on Wayland
 
 ## Rules
@@ -41,7 +41,7 @@ Every push to `main` runs `.github/workflows/release.yml`: CI → installers on 
   - Launch commands run without a shell (argv list only).
   - The config is refused if other users can write to it.
   - Never bypass OS protections: no focus-stealing hacks, no `SendInput` tricks, no elevation, no injecting into other processes. If the OS needs the user to grant something, detect it, explain it, and let the OS show its own prompt.
-  - What needs root (the SysRq setting; uninstalling a snap or .deb from the memory window) runs fixed argvs through `pkexec`, so the desktop shows its own password prompt. appkey's own binary never runs as root. apt removals are dry-run first and refused when they'd remove desktop/system packages.
+  - What needs root (the SysRq setting; uninstalling a snap or .deb from the Processes tab) runs fixed argvs through `pkexec`, so the desktop shows its own password prompt. appkey's own binary never runs as root. apt removals are dry-run first and refused when they'd remove desktop/system packages.
   - Every `unsafe` block needs a `// SAFETY:` comment.
 - Errors: `anyhow` with context that tells the user what to do. Hotkey failures go to the tray status/tooltip, not just stderr. In a tray app nobody sees stderr.
 - Keep `README.md` (user-facing) and `docs/DESIGN.md` (decisions, platform matrix) in sync with behaviour changes.
