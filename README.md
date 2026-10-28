@@ -64,7 +64,7 @@ Not sure which one you're using? Run `echo $XDG_SESSION_TYPE $XDG_CURRENT_DESKTO
 
 ## Set up your shortcuts
 
-Click the appkey icon in the tray / menu bar and choose **Settings…**. The settings window also opens by itself the first time you start appkey.
+Click the appkey icon in the tray / menu bar to open the settings window. Right-click it for the menu (status, **Edit config file…**, **Quit**). The settings window also opens by itself the first time you start appkey.
 
 appkey's windows follow your system's light or dark theme. To choose one yourself, click **Light** or **Dark** at the top right of the settings window (**System** goes back to following the system). The choice is saved straight away.
 

@@ -13,7 +13,7 @@ use std::time::{Duration, SystemTime};
 
 use anyhow::Result;
 use tray_icon::menu::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem};
-use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
+use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
 use crate::config::{self, Shortcut};
 use crate::hotkeys::{Hotkeys, Sink};
@@ -23,6 +23,8 @@ use crate::platform::{self, Outcome};
 pub enum Event {
     Hotkey(u32),
     Menu(MenuId),
+    /// Left click on the tray icon: opens settings (the menu is on right click).
+    TrayClick,
     /// Periodic: check whether the config file changed.
     Tick,
 }
@@ -90,7 +92,12 @@ impl App {
             &PredefinedMenuItem::separator(),
             &quit,
         ])?;
-        let tray = TrayIconBuilder::new().with_menu(Box::new(menu.clone())).with_tooltip("appkey");
+        // Linux: whether a left click shows the menu is up to the tray host; Cinnamon,
+        // KDE and the GNOME AppIndicator extension send it to us as a click instead.
+        let tray = TrayIconBuilder::new()
+            .with_menu(Box::new(menu.clone()))
+            .with_menu_on_left_click(false)
+            .with_tooltip("appkey");
         #[cfg(target_os = "macos")]
         let tray = tray.with_icon_templated(icon());
         #[cfg(not(target_os = "macos"))]
@@ -147,6 +154,7 @@ impl App {
                 }
             }
             Event::Menu(_) => {}
+            Event::TrayClick => self.open_settings(),
             Event::Tick => {
                 if self.hotkeys.is_none() && std::time::Instant::now() >= self.next_retry {
                     self.next_retry = std::time::Instant::now() + HOTKEY_RETRY;
@@ -239,7 +247,18 @@ pub(crate) fn log(msg: &str) {
 /// the sink hotkey backends report presses to.
 fn forward_events(send: impl Fn(Event) + Send + Sync + Clone + 'static) -> Sink {
     let on_hotkey = send.clone();
+    let on_click = send.clone();
     MenuEvent::set_event_handler(Some(move |e: MenuEvent| send(Event::Menu(e.id))));
+    TrayIconEvent::set_event_handler(Some(move |e: TrayIconEvent| {
+        if let TrayIconEvent::Click {
+            button: MouseButton::Left,
+            button_state: MouseButtonState::Up,
+            ..
+        } = e
+        {
+            on_click(Event::TrayClick);
+        }
+    }));
     std::sync::Arc::new(move |id| on_hotkey(Event::Hotkey(id)))
 }
 
