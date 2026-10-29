@@ -718,6 +718,12 @@ impl ProcessesTab {
             .small(),
         );
         ui.add_space(4.0);
+        if self.tree.is_empty() {
+            // Not built yet (the view was just switched on): build it from what's listed
+            // now, so "couldn't read" below only shows when there's really nothing.
+            let list: Vec<Proc> = self.procs.values().cloned().collect();
+            self.refresh_tree(&list);
+        }
         let tree = std::mem::take(&mut self.tree);
         let mut action = None;
         egui::Grid::new("cgroups")
