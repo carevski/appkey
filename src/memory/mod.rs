@@ -114,6 +114,39 @@ pub fn parse_status(text: &str) -> Option<ProcStatus> {
     })
 }
 
+/// More of `/proc/<pid>/status`, for a process's details. Sizes in KiB.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StatusDetails {
+    /// e.g. "S (sleeping)".
+    pub state: String,
+    pub threads: Option<u64>,
+    /// Its own memory (heap, stacks).
+    pub rss_anon_kib: Option<u64>,
+    /// Mapped files: its program, libraries, files it maps.
+    pub rss_file_kib: Option<u64>,
+    /// Shared memory and tmpfs.
+    pub rss_shmem_kib: Option<u64>,
+    pub swap_kib: Option<u64>,
+    /// The most it has ever been resident.
+    pub peak_rss_kib: Option<u64>,
+}
+
+pub fn parse_status_details(text: &str) -> StatusDetails {
+    let field = |name: &str| {
+        text.lines().find_map(|l| l.strip_prefix(name)?.strip_prefix(':')).map(str::trim)
+    };
+    let kib = |name: &str| field(name)?.split_whitespace().next()?.parse().ok();
+    StatusDetails {
+        state: field("State").unwrap_or_default().to_owned(),
+        threads: field("Threads").and_then(|t| t.parse().ok()),
+        rss_anon_kib: kib("RssAnon"),
+        rss_file_kib: kib("RssFile"),
+        rss_shmem_kib: kib("RssShmem"),
+        swap_kib: kib("VmSwap"),
+        peak_rss_kib: kib("VmHWM"),
+    }
+}
+
 /// Desktop and session processes (as `comm`, max 15 chars): closing them would end
 /// or break the session, so the dialog never offers them.
 const PROTECTED: &[&str] = &[
@@ -296,6 +329,29 @@ mod linux {
             }
         }
         Some(p)
+    }
+
+    /// What the details popup shows beyond [`Proc`], read when it's open.
+    #[derive(Debug, Clone, Default)]
+    pub struct ProcDetails {
+        pub status: super::StatusDetails,
+        /// The program file (`/proc/<pid>/exe`).
+        pub exe: Option<String>,
+        /// How likely Linux is to end it when memory runs out (0–1000, higher first).
+        pub oom_score: Option<u32>,
+        pub oom_score_adj: Option<i32>,
+    }
+
+    pub fn read_details(pid: u32) -> ProcDetails {
+        let read = |file: &str| fs::read_to_string(format!("/proc/{pid}/{file}")).ok();
+        ProcDetails {
+            status: read("status").map(|t| super::parse_status_details(&t)).unwrap_or_default(),
+            exe: fs::read_link(format!("/proc/{pid}/exe"))
+                .ok()
+                .map(|e| e.to_string_lossy().into_owned()),
+            oom_score: read("oom_score").and_then(|t| t.trim().parse().ok()),
+            oom_score_adj: read("oom_score_adj").and_then(|t| t.trim().parse().ok()),
+        }
     }
 
     /// Clock ticks per second (for `cpu_ticks` and `start_ticks`).
@@ -730,6 +786,26 @@ mod tests {
         );
         assert_eq!(mem.available_percent(), 7);
         assert_eq!(parse_meminfo("MemTotal: 1 kB\n"), None);
+    }
+
+    #[test]
+    fn status_details() {
+        let text = "Name:\tjava\nState:\tS (sleeping)\nVmHWM:\t 9000 kB\nVmRSS:\t 8000 kB\n\
+                    RssAnon:\t 7000 kB\nRssFile:\t 900 kB\nRssShmem:\t 100 kB\nVmSwap:\t 50 kB\n\
+                    Threads:\t42\n";
+        assert_eq!(
+            parse_status_details(text),
+            StatusDetails {
+                state: "S (sleeping)".into(),
+                threads: Some(42),
+                rss_anon_kib: Some(7000),
+                rss_file_kib: Some(900),
+                rss_shmem_kib: Some(100),
+                swap_kib: Some(50),
+                peak_rss_kib: Some(9000),
+            }
+        );
+        assert_eq!(parse_status_details("Name:\tkthreadd\n"), StatusDetails::default());
 
         let psi = "some avg10=23.50 avg60=4.00 avg300=1.00 total=1\nfull avg10=9.00 avg60=0 avg300=0 total=0\n";
         assert_eq!(parse_pressure(psi), Some(23.5));

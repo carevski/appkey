@@ -67,6 +67,18 @@ enum Action {
     Show(u32),
     /// Start "Uninstall…" for the app with this root.
     Uninstall(u32),
+    /// Open the details popup for this process.
+    Details(u32),
+}
+
+/// The details popup: the process as it was when opened (so it can still be read
+/// after the process ends), and what's re-read from `/proc` while it's open.
+#[derive(Debug)]
+struct Details {
+    proc: Proc,
+    info: memory::ProcDetails,
+    read: Instant,
+    ended: bool,
 }
 
 #[derive(Debug)]
@@ -116,6 +128,9 @@ pub struct ProcessesTab {
     status: Option<String>,
     sysrq_f: bool,
     uninstall: Option<Uninstall>,
+    details: Option<Details>,
+    /// Which app each process belongs to: (its label, its root pid).
+    app_of: HashMap<u32, (String, u32)>,
 }
 
 impl ProcessesTab {
@@ -154,6 +169,8 @@ impl ProcessesTab {
             status: None,
             sysrq_f: sysrq::read_current().is_ok_and(|v| sysrq::allows(v, sysrq::SIGNAL)),
             uninstall: None,
+            details: None,
+            app_of: HashMap::new(),
         };
         d.refresh();
         // CPU needs two samples: take the second one soon.
@@ -180,6 +197,20 @@ impl ProcessesTab {
     pub fn show_cgroups(&mut self) {
         self.group_by = GroupBy::Cgroup;
         self.refresh();
+    }
+
+    /// Opens the details of the user's biggest process (for screenshots).
+    #[cfg(debug_assertions)]
+    pub fn show_details(&mut self) {
+        let biggest = self
+            .procs
+            .values()
+            .filter(|p| p.uid == self.uid && !p.cmdline.is_empty())
+            .max_by_key(|p| p.rss_kib)
+            .map(|p| p.pid);
+        if let Some(pid) = biggest {
+            self.apply(Action::Details(pid));
+        }
     }
 
     fn refresh(&mut self) {
@@ -212,6 +243,10 @@ impl ProcessesTab {
             &self.titles,
             &self.home,
         );
+        self.app_of = groups
+            .iter()
+            .flat_map(|g| g.members.iter().map(|&pid| (pid, (g.label.clone(), g.root))))
+            .collect();
         if self.group_by == GroupBy::Cgroup {
             self.refresh_tree(&list);
         }
@@ -314,7 +349,7 @@ impl ProcessesTab {
     fn apply(&mut self, action: Action) {
         let now = Instant::now();
         // Showing a window or starting "Uninstall…" changes nothing we list (yet).
-        let reread = !matches!(action, Action::Show(_) | Action::Uninstall(_));
+        let reread = !matches!(action, Action::Show(_) | Action::Uninstall(_) | Action::Details(_));
         let find = |root: u32| self.all_groups().find(|g| g.root == root).cloned();
         match action {
             Action::Close(roots) => {
@@ -356,6 +391,16 @@ impl ProcessesTab {
                         let _ = tx.send(uninstall::plan(root));
                     });
                     self.uninstall = Some(Uninstall::Checking { root, label: g.label, rx });
+                }
+            }
+            Action::Details(pid) => {
+                if let Some(p) = self.procs.get(&pid) {
+                    self.details = Some(Details {
+                        proc: p.clone(),
+                        info: memory::read_details(pid),
+                        read: Instant::now(),
+                        ended: self.ended.contains(&pid),
+                    });
                 }
             }
         }
@@ -653,7 +698,9 @@ impl ProcessesTab {
                 if pid == g.root && g.members.len() > 1 {
                     text.push_str(" (main)");
                 }
-                ui.label(truncate(&text, 48)).on_hover_text(self.hover(pid, None));
+                if name_label(ui, &text).on_hover_text(self.hover(pid, None)).clicked() {
+                    action = Some(Action::Details(pid));
+                }
             });
             ui.horizontal(|ui| {
                 ui.add_space(64.0);
@@ -685,6 +732,9 @@ impl ProcessesTab {
                     };
                     if ui.small_button("End").on_hover_text(hint).clicked() {
                         action = Some(Action::End(pid));
+                    }
+                    if details_button(ui) {
+                        action = Some(Action::Details(pid));
                     }
                 }
             });
@@ -821,7 +871,10 @@ impl ProcessesTab {
         let mut action = None;
         ui.horizontal(|ui| {
             ui.add_space(indent);
-            ui.label(truncate(&procs::describe(p), 48)).on_hover_text(self.hover(pid, None));
+            let name = truncate(&self.qualified_name(pid, p), 56);
+            if name_label(ui, &name).on_hover_text(self.hover(pid, None)).clicked() {
+                action = Some(Action::Details(pid));
+            }
         });
         cell(ui, RichText::new(memory::format_kib(p.rss_kib)).weak(), MEM_W);
         cell(ui, RichText::new(cpu_text(self.cpu.get(&pid).copied().unwrap_or(0.0))).weak(), CPU_W);
@@ -842,10 +895,25 @@ impl ProcessesTab {
                 if ui.small_button("End").on_hover_text("End just this process").clicked() {
                     action = Some(Action::End(pid));
                 }
+                if details_button(ui) {
+                    action = Some(Action::Details(pid));
+                }
             }
         });
         ui.end_row();
         action
+    }
+
+    /// What a process is, with the app it belongs to when it's one of that app's helpers:
+    /// "Chrome › Tab", "Slack › GPU", "`IntelliJ` IDEA › Java: sbt-launch.jar".
+    fn qualified_name(&self, pid: u32, p: &Proc) -> String {
+        let what = procs::describe(p);
+        match self.app_of.get(&pid) {
+            Some((app, root)) if *root != pid && !what.starts_with(app.as_str()) => {
+                format!("{app} › {what}")
+            }
+            _ => what,
+        }
     }
 
     fn node_cpu(&self, n: &Node) -> f32 {
@@ -950,7 +1018,12 @@ impl ProcessesTab {
 
     fn proc_text(&self, pid: u32, prefix: &str) -> Option<Row> {
         let p = self.procs.get(&pid)?;
-        let mut name = format!("{prefix}{}", procs::describe(p));
+        let what = if self.group_by == GroupBy::Cgroup {
+            self.qualified_name(pid, p)
+        } else {
+            procs::describe(p)
+        };
+        let mut name = format!("{prefix}{what}");
         if self.ended.contains(&pid) {
             name.push_str(" (ended)");
         }
@@ -1234,9 +1307,152 @@ impl ProcessesTab {
         }
     }
 
+    /// Everything about one process, in a popup that stays until closed. While open its
+    /// numbers are re-read every 2 s; if it ends, the last ones stay, marked as ended.
+    fn details_dialog(&mut self, ctx: &egui::Context) {
+        let Some(mut d) = self.details.take() else { return };
+        let pid = d.proc.pid;
+        if !d.ended && d.read.elapsed() >= REFRESH {
+            let same = |p: &&Proc| p.start_ticks == d.proc.start_ticks;
+            match self.procs.get(&pid).filter(same).filter(|_| !self.ended.contains(&pid)) {
+                Some(p) => {
+                    d.proc = p.clone();
+                    d.info = memory::read_details(pid);
+                }
+                None => d.ended = true,
+            }
+            d.read = Instant::now();
+        }
+        ctx.request_repaint_after(Duration::from_secs(1));
+        let title = self.qualified_name(pid, &d.proc);
+        let rows = self.details_rows(&d);
+        let mut close = false;
+        // Fits the window; long values and arguments wrap.
+        let width = (ctx.content_rect().width() - 80.0).clamp(300.0, 720.0);
+        let shown = egui::Modal::new(egui::Id::new("process-details")).show(ctx, |ui| {
+            ui.set_width(width);
+            ui.heading(&title);
+            if d.ended {
+                ui.label(
+                    RichText::new("This process has ended. These are its last details.")
+                        .color(ui.visuals().warn_fg_color),
+                );
+            }
+            ui.add_space(6.0);
+            egui::Grid::new("process-details-grid").num_columns(2).spacing([12.0, 4.0]).show(
+                ui,
+                |ui| {
+                    for (k, v) in &rows {
+                        ui.label(RichText::new(*k).weak());
+                        ui.add(egui::Label::new(v).wrap());
+                        ui.end_row();
+                    }
+                },
+            );
+            ui.add_space(8.0);
+            let args = &d.proc.cmdline;
+            ui.label(RichText::new(format!("Command, {} argument(s)", args.len())).weak());
+            egui::ScrollArea::vertical().max_height(240.0).auto_shrink([false, true]).show(
+                ui,
+                |ui| {
+                    for a in args {
+                        ui.add(egui::Label::new(RichText::new(a).monospace()).wrap());
+                    }
+                },
+            );
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui.button("Copy").on_hover_text("Copies these details as text").clicked() {
+                    ui.ctx().copy_text(details_text(&title, &rows, args));
+                }
+                if ui.button("Close").clicked() {
+                    close = true;
+                }
+            });
+        });
+        if !(close || shown.should_close()) {
+            self.details = Some(d);
+        }
+    }
+
+    fn details_rows(&self, d: &Details) -> Vec<(&'static str, String)> {
+        let p = &d.proc;
+        let st = &d.info.status;
+        let kib = |k: Option<u64>| k.map(memory::format_kib);
+        let mut rows = Vec::new();
+        if let Some((app, root)) = self.app_of.get(&p.pid) {
+            let main = if *root == p.pid { ", its main process" } else { "" };
+            rows.push(("App", format!("{app}{main}")));
+        }
+        rows.push(("Process", format!("{} (pid {})", p.name, p.pid)));
+        let parent = self.procs.get(&p.ppid).map(|q| format!(", {}", procs::describe(q)));
+        rows.push(("Parent", format!("pid {}{}", p.ppid, parent.unwrap_or_default())));
+        let mut state = st.state.clone();
+        if let Some(t) = st.threads {
+            let _ = write!(state, ", {t} thread(s)");
+        }
+        rows.push(("State", state));
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            clippy::cast_precision_loss
+        )]
+        let age = (self.uptime - p.start_ticks as f64 / self.hz.max(1) as f64).max(0.0) as u64;
+        rows.push(("Running for", procs::format_age(age)));
+        rows.push((
+            "CPU",
+            format!(
+                "{} now, {} in total",
+                cpu_text(self.cpu.get(&p.pid).copied().unwrap_or(0.0)),
+                procs::format_age(p.cpu_ticks / self.hz.max(1))
+            ),
+        ));
+        let mut ram = format!("{} in RAM", memory::format_kib(p.rss_kib));
+        if let (Some(a), Some(f), Some(s)) =
+            (kib(st.rss_anon_kib), kib(st.rss_file_kib), kib(st.rss_shmem_kib))
+        {
+            let _ = write!(ram, ": {a} its own, {f} files, {s} shared");
+        }
+        rows.push(("Memory", ram));
+        if let Some(s) = kib(st.swap_kib) {
+            rows.push(("In swap", s));
+        }
+        if let Some(h) = kib(st.peak_rss_kib) {
+            rows.push(("Most in RAM", h));
+        }
+        if let Some(o) = d.info.oom_score {
+            let mut text =
+                format!("{o} of 1000 (when memory runs out, Linux ends the highest first)");
+            if let Some(adj) = d.info.oom_score_adj.filter(|a| *a != 0) {
+                let _ = write!(text, ", adjusted by {adj}");
+            }
+            rows.push(("OOM score", text));
+        }
+        if let Some(exe) = &d.info.exe {
+            rows.push(("Program", exe.clone()));
+        }
+        if let Some(cwd) = &p.cwd {
+            rows.push(("Folder", cwd.clone()));
+        }
+        if let Some(t) = self.titles.get(&p.pid).filter(|t| !t.is_empty()) {
+            rows.push(("Windows", t.join("\n")));
+        }
+        if !p.cgroup.is_empty() {
+            let mut c = p.cgroup.clone();
+            let last = p.cgroup.rsplit('/').next().unwrap_or_default();
+            if let Some(what) = cgroup::describe(last) {
+                let _ = write!(c, "\n({what})");
+            }
+            rows.push(("cgroup", c));
+        }
+        rows.push(("Terminal", if p.tty { "yes" } else { "no" }.into()));
+        rows
+    }
+
     /// The uninstall dialog, and what was clicked in the tab this frame.
     pub fn finish(&mut self, ctx: &egui::Context) {
         self.uninstall_dialog(ctx);
+        self.details_dialog(ctx);
         if let Some(a) = self.pending.take().filter(|_| self.uninstall.is_none()) {
             self.apply(a);
         }
@@ -1333,6 +1549,32 @@ impl std::fmt::Debug for Uninstall {
             Self::Done { .. } => "Done",
         })
     }
+}
+
+/// A process's name, which opens its details when clicked.
+fn name_label(ui: &mut egui::Ui, text: &str) -> egui::Response {
+    ui.add(egui::Label::new(text).sense(egui::Sense::click()))
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// The "Details" button of a process row; `true` when clicked.
+fn details_button(ui: &mut egui::Ui) -> bool {
+    ui.small_button("Details")
+        .on_hover_text("Everything about this process: the full command, memory, parent…")
+        .clicked()
+}
+
+/// The details popup as text, for the clipboard.
+fn details_text(title: &str, rows: &[(&str, String)], args: &[String]) -> String {
+    let mut out = format!("{title}\n");
+    for (k, v) in rows {
+        let _ = writeln!(out, "{k}: {}", v.replace('\n', "\n    "));
+    }
+    out.push_str("Command:\n");
+    for a in args {
+        let _ = writeln!(out, "    {a}");
+    }
+    out
 }
 
 fn modal(ctx: &egui::Context, body: impl FnOnce(&mut egui::Ui)) {

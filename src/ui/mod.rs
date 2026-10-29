@@ -577,12 +577,14 @@ impl Settings {
         }
         #[cfg(target_os = "linux")]
         if let Some(scene) = self.devshot.as_mut().map(|s| std::mem::take(&mut s.scene)) {
-            if matches!(scene.as_str(), "processes" | "cgroups") {
+            if matches!(scene.as_str(), "processes" | "cgroups" | "details") {
                 self.show_processes(None);
-                if scene == "cgroups"
-                    && let Some(p) = &mut self.processes
-                {
-                    p.show_cgroups();
+                if let Some(p) = &mut self.processes {
+                    match scene.as_str() {
+                        "cgroups" => p.show_cgroups(),
+                        "details" => p.show_details(),
+                        _ => {}
+                    }
                 }
             } else if let Some(shot) = &mut self.devshot {
                 shot.scene = scene;

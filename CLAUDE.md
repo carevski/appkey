@@ -12,7 +12,7 @@ Tiny cross-platform (macOS, Windows, Linux/X11) tray app: a global shortcut open
 - Size check: `cargo build --release && ls -lh target/release/appkey`
 - Linux end-to-end on Xvfb + Openbox, both in CI and in `/verify`: `scripts/test-x11.sh <binary>` (focus behaviour), `scripts/test-settings-ui.sh <binary>` (record shortcut → save → daemon reload → shortcut works)
 - Wayland e2e (containers; see `/verify` and docs/DESIGN.md "Testing Wayland"): `scripts/wayland/test-{gnome,kde,hyprland}.sh`
-- See the settings window without screen-recording permission (debug builds): `APPKEY_SCREENSHOT=/tmp/s.png cargo run -- settings`, add `APPKEY_SCREENSHOT_SCENE=picker` for the app picker, `=memory` for the Memory tab, `=processes` / `=cgroups` for the Processes tab (Linux; add `APPKEY_SCREENSHOT_WAIT=4` so CPU % is sampled first). Then Read the PNG. Do this after any UI change.
+- See the settings window without screen-recording permission (debug builds): `APPKEY_SCREENSHOT=/tmp/s.png cargo run -- settings`, add `APPKEY_SCREENSHOT_SCENE=picker` for the app picker, `=memory` for the Memory tab, `=processes` / `=cgroups` / `=details` (the details popup) for the Processes tab (Linux; add `APPKEY_SCREENSHOT_WAIT=4` so CPU % is sampled first). Then Read the PNG. Do this after any UI change.
 
 ## Releases
 
