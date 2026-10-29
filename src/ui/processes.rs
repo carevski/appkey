@@ -262,7 +262,9 @@ impl ProcessesTab {
     /// Rebuilds the cgroup tree, unless rows are held (then only the kernel's numbers
     /// change; [`Node::recount`] updates the sums).
     fn refresh_tree(&mut self, list: &[Proc]) {
-        if !(self.holding && self.refreshes > 2) {
+        // Built right away when the view was just switched on (the pointer is on the
+        // switch, so rows would otherwise be held empty).
+        if self.tree.is_empty() || !(self.holding && self.refreshes > 2) {
             let items: Vec<(u32, &str, u64)> = list
                 .iter()
                 .filter(|p| p.uid == self.uid && !p.cgroup.is_empty())
@@ -858,6 +860,100 @@ impl ProcessesTab {
         s
     }
 
+    /// What the tab shows, in the current grouping, as plain text to paste somewhere:
+    /// every process of each listed app (or cgroup), with its numbers, pid and command.
+    fn tree_text(&self) -> String {
+        let mut out = String::new();
+        let grouping = if self.group_by == GroupBy::Cgroup { "cgroup" } else { "app" };
+        let _ = write!(out, "Processes by {grouping}");
+        if let Some(s) = &self.snapshot {
+            let _ = write!(
+                out,
+                ", {} of {} free",
+                memory::format_kib(s.mem.available_kib),
+                memory::format_kib(s.mem.total_kib)
+            );
+        }
+        out.push('\n');
+        let mut rows = Vec::new();
+        if self.group_by == GroupBy::Cgroup {
+            out.push('\n');
+            for n in &self.tree {
+                self.cgroup_text(&mut rows, n, "", "");
+            }
+        } else {
+            for (title, groups) in
+                [("Left running in the background", &self.background), ("Apps", &self.apps)]
+            {
+                if groups.is_empty() {
+                    continue;
+                }
+                rows.push(Row::heading(title));
+                for g in groups {
+                    let cpu = cpu_text(self.group_cpu(g));
+                    let mut name = format!("{} ({})", g.label, g.members.len());
+                    if !g.detail.is_empty() {
+                        let _ = write!(name, "  {}", truncate(&g.detail, 60));
+                    }
+                    rows.push(Row::new(name, memory::format_kib(g.rss_kib), cpu, String::new()));
+                    for (i, &pid) in g.members.iter().enumerate() {
+                        let last = i + 1 == g.members.len();
+                        rows.extend(self.proc_text(pid, if last { "└─ " } else { "├─ " }));
+                    }
+                }
+            }
+            rows.push(Row::heading(&format!(
+                "(apps under {} and idle are not listed)",
+                memory::format_kib(MIN_KIB)
+            )));
+        }
+        out.push_str(&align_rows(&rows));
+        out
+    }
+
+    fn cgroup_text(&self, rows: &mut Vec<Row>, n: &Node, prefix: &str, branch: &str) {
+        let kernel = self.cgroup_memory.get(&n.path).copied().unwrap_or_default();
+        let used = kernel.current.map_or(n.rss_kib, |b| b / 1024);
+        let mut name = format!("{prefix}{branch}{} ({})", n.name, n.count);
+        if let Some(limit) = limit_text(kernel) {
+            let _ = write!(name, "  [{limit}]");
+        }
+        rows.push(Row::new(
+            name,
+            memory::format_kib(used),
+            cpu_text(self.node_cpu(n)),
+            String::new(),
+        ));
+        // What's below this node lines up under its name.
+        let below = match branch {
+            "├─ " => format!("{prefix}│  "),
+            "└─ " => format!("{prefix}   "),
+            _ => prefix.to_owned(),
+        };
+        let count = n.children.len() + n.procs.len();
+        for (i, c) in n.children.iter().enumerate() {
+            self.cgroup_text(rows, c, &below, if i + 1 == count { "└─ " } else { "├─ " });
+        }
+        for (i, &pid) in n.procs.iter().enumerate() {
+            let last = n.children.len() + i + 1 == count;
+            rows.extend(
+                self.proc_text(pid, &format!("{below}{}", if last { "└─ " } else { "├─ " })),
+            );
+        }
+    }
+
+    fn proc_text(&self, pid: u32, prefix: &str) -> Option<Row> {
+        let p = self.procs.get(&pid)?;
+        let mut name = format!("{prefix}{}", procs::describe(p));
+        if self.ended.contains(&pid) {
+            name.push_str(" (ended)");
+        }
+        let cpu = cpu_text(self.cpu.get(&pid).copied().unwrap_or(0.0));
+        let mut row = Row::new(name, memory::format_kib(p.rss_kib), cpu, self.age_text(pid));
+        row.extra = format!("pid {pid}  {}", truncate(&p.cmdline.join(" "), 120));
+        Some(row)
+    }
+
     /// Close selected, sorting and grouping, and Dismiss / Snooze while warning.
     pub fn footer(&mut self, ui: &mut egui::Ui) -> Option<Answer> {
         let mut action = None;
@@ -889,6 +985,7 @@ impl ProcessesTab {
                  Apps started with the memory limit on share one slice.",
             );
             if self.group_by != before {
+                self.tree.clear();
                 self.refresh();
             }
             ui.separator();
@@ -902,6 +999,20 @@ impl ProcessesTab {
                 self.sort_groups(&mut b);
                 self.sort_groups(&mut a);
                 (self.background, self.apps) = (b, a);
+            }
+            ui.separator();
+            if ui
+                .button("Copy process tree")
+                .on_hover_text(
+                    "Copies what's listed, as grouped now, as text: names, memory, CPU, pids \
+                     and commands. Commands can contain paths or tokens; check before sharing.",
+                )
+                .clicked()
+            {
+                let text = self.tree_text();
+                let lines = text.lines().count();
+                ui.ctx().copy_text(text);
+                self.status = Some(format!("Copied the process tree ({lines} lines)."));
             }
             if self.mode.is_some() {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -950,6 +1061,52 @@ fn limit_text(m: CgroupMemory) -> Option<String> {
         parts.push(format!("swap up to {}", gb(s)));
     }
     (!parts.is_empty()).then(|| parts.join(", "))
+}
+
+/// One line of the copied process tree.
+struct Row {
+    name: String,
+    memory: String,
+    cpu: String,
+    age: String,
+    extra: String,
+    heading: bool,
+}
+
+impl Row {
+    fn new(name: String, memory: String, cpu: String, age: String) -> Self {
+        Self { name, memory, cpu, age, extra: String::new(), heading: false }
+    }
+
+    fn heading(text: &str) -> Self {
+        Self {
+            heading: true,
+            ..Self::new(text.to_owned(), String::new(), String::new(), String::new())
+        }
+    }
+}
+
+/// The rows as text, with the number columns lined up after the longest name.
+fn align_rows(rows: &[Row]) -> String {
+    let width = |f: fn(&Row) -> &str| {
+        rows.iter().filter(|r| !r.heading).map(|r| f(r).chars().count()).max().unwrap_or(0)
+    };
+    let (name_w, mem_w, cpu_w, age_w) =
+        (width(|r| &r.name), width(|r| &r.memory), width(|r| &r.cpu), width(|r| &r.age));
+    let mut out = String::new();
+    for r in rows {
+        if r.heading {
+            let _ = writeln!(out, "\n{}", r.name);
+            continue;
+        }
+        let pad = name_w - r.name.chars().count();
+        let _ = writeln!(
+            out,
+            "{}{:pad$}  {:>mem_w$}  {:>cpu_w$}  {:>age_w$}  {}",
+            r.name, "", r.memory, r.cpu, r.age, r.extra
+        );
+    }
+    out.lines().map(str::trim_end).collect::<Vec<_>>().join("\n") + "\n"
 }
 
 fn cpu_text(pct: f32) -> String {
@@ -1193,6 +1350,20 @@ mod tests {
             has_window: false,
             detached: false,
         }
+    }
+
+    #[test]
+    fn copied_rows_line_up() {
+        let mut rows = vec![
+            Row::heading("Apps"),
+            Row::new("Chrome (2)".into(), "1.2 GB".into(), "5% CPU".into(), String::new()),
+            Row::new("└─ tab".into(), "300 MB".into(), "–".into(), "2 min".into()),
+        ];
+        rows[2].extra = "pid 7  chrome --type=renderer".into();
+        assert_eq!(
+            align_rows(&rows),
+            "\nApps\nChrome (2)  1.2 GB  5% CPU\n└─ tab      300 MB       –  2 min  pid 7  chrome --type=renderer\n"
+        );
     }
 
     #[test]
