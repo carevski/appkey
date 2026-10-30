@@ -77,7 +77,7 @@ appkey's windows follow your system's light or dark theme. To choose one yoursel
 
 To change a shortcut, click its keys or its app. To delete one, click **Remove**. If something's wrong, the row says so (for example "Same shortcut as row 2") and **Save** stays disabled until it's fixed.
 
-The tray menu shows how many shortcuts are active. If one couldn't be set up, it tells you why. Usually another app already uses that key combination.
+The tray menu's top line shows which version of appkey you're running. If a shortcut couldn't be set up, a line under it tells you why (usually another app already uses that key combination). Hovering the tray icon shows how many shortcuts are active.
 
 ### The config file
 
@@ -238,7 +238,7 @@ On Windows, tick **Add appkey to PATH** in the installer to use these from a ter
 
 ## Troubleshooting
 
-- **A shortcut does nothing:** open the tray menu. The top line says how many shortcuts are active and lists any that failed. Run `appkey check` to validate the config.
+- **A shortcut does nothing:** open the tray menu. Under the version, a line lists any shortcut that failed and why; hovering the icon shows how many are active. Run `appkey check` to validate the config.
 - **"Shortcut unavailable":** another app already owns that combination. Pick a different one.
 - **The wrong app opens, or a second copy starts:** the `app` name doesn't match. Run `appkey list` while the app is open and copy the name exactly.
 - **Linux: "this Wayland desktop isn't supported yet":** see [Which Linux desktops work](#which-linux-desktops-work).

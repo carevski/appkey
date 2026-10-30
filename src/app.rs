@@ -53,6 +53,8 @@ pub struct App {
     tray: Option<TrayIcon>,
     menu: Menu,
     status: MenuItem,
+    /// `status` is in the menu (only while there's a problem to report).
+    status_shown: bool,
     settings: MenuId,
     edit: MenuId,
     reload: MenuId,
@@ -83,13 +85,15 @@ impl App {
             Ok(h) => (Some(h), String::new()),
             Err(e) => (None, format!("{e:#}")),
         };
-        let status = MenuItem::new("appkey", false, None);
+        let version = MenuItem::new(format!("appkey {VERSION}"), false, None);
+        // Shown under the version only while something is wrong.
+        let status = MenuItem::new("", false, None);
         let settings = MenuItem::new("Settings…", true, None);
         let edit = MenuItem::new("Edit config file…", true, None);
         let reload = MenuItem::new("Reload config", true, None);
         let quit = MenuItem::new("Quit appkey", true, None);
         let menu = Menu::with_items(&[
-            &status,
+            &version,
             &PredefinedMenuItem::separator(),
             &settings,
             &edit,
@@ -102,7 +106,7 @@ impl App {
         let tray = TrayIconBuilder::new()
             .with_menu(Box::new(menu.clone()))
             .with_menu_on_left_click(false)
-            .with_tooltip("appkey");
+            .with_tooltip(format!("appkey {VERSION}"));
         #[cfg(target_os = "macos")]
         let tray = tray.with_icon_templated(icon());
         #[cfg(not(target_os = "macos"))]
@@ -124,6 +128,7 @@ impl App {
             tray,
             menu,
             status,
+            status_shown: false,
             settings: settings.id().clone(),
             edit: edit.id().clone(),
             reload: reload.id().clone(),
@@ -242,20 +247,36 @@ impl App {
         if !failed.is_empty() {
             let _ = write!(msg, "; unavailable: {}", failed.join(", "));
         }
-        self.set_status(&msg);
+        self.show_status(&msg, !failed.is_empty());
     }
 
+    /// Reports a problem: in the menu under the version, and in the tooltip.
     fn set_status(&mut self, msg: &str) {
+        self.show_status(msg, true);
+    }
+
+    /// The tooltip always says how things are; the menu adds a line only for a problem.
+    fn show_status(&mut self, msg: &str, problem: bool) {
         #[cfg(target_os = "linux")]
-        let msg = &match &self.limit_error {
-            Some(e) => format!("{msg}; memory limit not set: {e}"),
-            None => msg.to_owned(),
+        let (msg, problem) = match &self.limit_error {
+            Some(e) => (&format!("{msg}; memory limit not set: {e}"), true),
+            None => (&msg.to_owned(), problem),
         };
         log(msg);
         let first_line = msg.lines().next().unwrap_or_default();
         self.status.set_text(first_line);
+        if problem != self.status_shown {
+            let changed = if problem {
+                self.menu.insert(&self.status, 1)
+            } else {
+                self.menu.remove(&self.status)
+            };
+            if changed.is_ok() {
+                self.status_shown = problem;
+            }
+        }
         if let Some(tray) = &self.tray {
-            let _ = tray.set_tooltip(Some(format!("appkey: {first_line}")));
+            let _ = tray.set_tooltip(Some(format!("appkey {VERSION}: {first_line}")));
             // Some tray backends (Linux SNI) snapshot the menu; push the change.
             tray.set_menu(Some(Box::new(self.menu.clone())));
         }
@@ -265,6 +286,9 @@ impl App {
 fn config_mtime(path: &std::path::Path) -> Option<SystemTime> {
     std::fs::metadata(path).and_then(|m| m.modified()).ok()
 }
+
+/// This build's version: `0.1.<run>` in releases (stamped by CI), `0.1.0` in dev builds.
+const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub(crate) fn log(msg: &str) {
     eprintln!("appkey: {msg}");

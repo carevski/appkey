@@ -40,12 +40,17 @@ type Start = Option<processes::Mode>;
 #[cfg(not(target_os = "linux"))]
 type Start = Option<()>;
 
+/// Window sizes in points; eframe shrinks them to fit smaller screens.
+const SETTINGS_SIZE: [f32; 2] = [860.0, 680.0];
+/// The Processes tab needs room for its columns.
+const PROCESSES_SIZE: [f32; 2] = [1040.0, 720.0];
+
 fn open(config_path: PathBuf, start: Start) -> Result<()> {
     let title = window_title(start);
     let viewport = egui::ViewportBuilder::default()
         .with_title(title)
         .with_app_id("appkey")
-        .with_inner_size(if start.is_some() { [940.0, 620.0] } else { [660.0, 560.0] })
+        .with_inner_size(if start.is_some() { PROCESSES_SIZE } else { SETTINGS_SIZE })
         .with_min_inner_size([520.0, 300.0]);
     // A warning stays in view, but doesn't take the keyboard from what you're doing.
     #[cfg(target_os = "linux")]
@@ -58,7 +63,8 @@ fn open(config_path: PathBuf, start: Start) -> Result<()> {
     requests::listen();
     eframe::run_native(
         "appkey",
-        eframe::NativeOptions { viewport, ..Default::default() },
+        // Centered on the primary screen (X11, macOS, Windows; Wayland places it itself).
+        eframe::NativeOptions { viewport, centered: true, ..Default::default() },
         Box::new(move |cc| {
             font::install(&cc.egui_ctx)?;
             #[cfg(target_os = "linux")]
@@ -316,8 +322,9 @@ impl Settings {
             ));
             // The settings size is cramped for the table.
             let size = ctx.input(|i| i.viewport().inner_rect.map(|r| r.size()));
-            if size.is_some_and(|s| s.x < 900.0 || s.y < 560.0) {
-                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(940.0, 620.0)));
+            let [w, h] = PROCESSES_SIZE;
+            if size.is_some_and(|s| s.x < w - 40.0 || s.y < h - 60.0) {
+                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(w, h)));
             }
         }
     }
