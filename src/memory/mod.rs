@@ -579,18 +579,22 @@ mod linux {
         if unsafe { libc::kill(pid, window_signal(warning)) } != 0 {
             return false;
         }
-        // A warning stays on top without taking the keyboard; by hand, bring it forward.
-        if warning.is_none() {
-            let _ = crate::platform::focus_pid(p.pid);
-        }
+        // Forward for a warning too: the window may be minimized or under others, and
+        // the point of the warning is to be seen. The desktop does it (activation request,
+        // as from a pager), the same way a shortcut focuses an app.
+        let _ = crate::platform::focus_pid(p.pid);
         true
+    }
+
+    /// Switches the settings window that's already open (if any) to Processes, for
+    /// `warning`, and brings it forward. `false` when there's none to switch.
+    pub fn signal_open_window(warning: Option<Warning>) -> bool {
+        find_window().is_some_and(|p| signal_window(&p, warning))
     }
 
     /// The Processes tab, in the open settings window or a new one (shortcut, tray).
     pub fn show_window() -> Result<()> {
-        if let Some(p) = find_window()
-            && signal_window(&p, None)
-        {
+        if signal_open_window(None) {
             return Ok(());
         }
         let exe = std::env::current_exe()?;

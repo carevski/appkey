@@ -165,7 +165,7 @@ You always see what will be removed and the exact command first. appkey closes t
 
 Open it with **Show memory use now** on the Memory tab, `appkey memory`, or **its own shortcut**: in Shortcuts, add one and choose app → *appkey* → **Memory window**. If the settings window is already open, it switches to the tab instead of opening a second window. appkey only offers your own programs, never parts of the desktop itself.
 
-**Low-memory warning.** Tick *Warn me before the computer runs out of memory* and click **Save**. When free memory stays below the limit you set (10% by default), or programs keep waiting on memory (20% of the time by default), the settings window opens (or comes forward) on the Processes tab, on top of other windows. **Snooze for an hour** keeps the warning away for an hour; **Dismiss**, or switching to another tab, for 5 minutes.
+**Low-memory warning.** Tick *Warn me before the computer runs out of memory* and click **Save**. When free memory stays below the limit you set (10% by default), or programs keep waiting on memory (20% of the time by default), the settings window opens on the Processes tab, on top of other windows. If it is already open, even minimized or behind other windows, it comes to the front. **Snooze for an hour** keeps the warning away for an hour; **Dismiss**, or switching to another tab, for 5 minutes.
 
 **Busy background programs.** Tick *Also warn when a program left running in the background keeps the CPU busy* and pick how long (10 minutes by default). If such a program uses a whole CPU core for that long, the Processes tab opens with it at the top.
 

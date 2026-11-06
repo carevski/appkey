@@ -107,6 +107,10 @@ fn check(path: &Path) -> Result<()> {
 fn memory_window(path: std::path::PathBuf, flag: Option<&str>) -> Result<()> {
     let warning = flag
         .map(|f| if f == "--alert" { memory::Warning::LowMemory } else { memory::Warning::Busy });
+    // From a terminal: switch the settings window that's already open, like the shortcut.
+    if memory::signal_open_window(warning) {
+        return Ok(());
+    }
     ui::memory_window(path, warning)
 }
 

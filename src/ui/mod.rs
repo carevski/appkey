@@ -317,6 +317,10 @@ impl Settings {
         self.show_processes(mode);
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(window_title(Some(mode)).into()));
         if mode.is_some() {
+            // The daemon also asks the desktop to activate us; this covers a minimized
+            // window where that alone doesn't restore it.
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
             ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(
                 egui::WindowLevel::AlwaysOnTop,
             ));
