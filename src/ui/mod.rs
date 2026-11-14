@@ -46,6 +46,9 @@ const SETTINGS_SIZE: [f32; 2] = [860.0, 680.0];
 const PROCESSES_SIZE: [f32; 2] = [1040.0, 720.0];
 
 fn open(config_path: PathBuf, start: Start) -> Result<()> {
+    // Ubuntu / Mint: Processes is the first tab, and where settings open.
+    #[cfg(target_os = "linux")]
+    let start = start.or_else(|| crate::memory::available().then_some(None));
     let title = window_title(start);
     let viewport = egui::ViewportBuilder::default()
         .with_title(title)
@@ -579,6 +582,10 @@ impl Settings {
                 shot.scene.clear();
                 self.picker = Some((0, Picker::new(Some(&self.rows[0].app_info()))));
             }
+            if shot.scene == "shortcuts" {
+                shot.scene.clear();
+                self.tab = Tab::Shortcuts;
+            }
             #[cfg(target_os = "linux")]
             if shot.scene == "memory" && self.memory_tab.is_some() {
                 shot.scene.clear();
@@ -700,11 +707,14 @@ impl eframe::App for Settings {
         egui::Panel::top("tabs").show(ui, |ui| {
             ui.add_space(4.0);
             ui.horizontal(|ui| {
+                #[cfg(target_os = "linux")]
+                if self.memory_tab.is_some() {
+                    ui.selectable_value(&mut self.tab, Tab::Processes, "Processes");
+                }
                 ui.selectable_value(&mut self.tab, Tab::Shortcuts, "Shortcuts");
                 #[cfg(target_os = "linux")]
                 if self.memory_tab.is_some() {
                     ui.selectable_value(&mut self.tab, Tab::Memory, "Memory");
-                    ui.selectable_value(&mut self.tab, Tab::Processes, "Processes");
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if theme::picker(ui, &mut self.theme) {

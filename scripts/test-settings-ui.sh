@@ -62,9 +62,13 @@ sized() { eval "$(geometry)"; ((WIDTH >= 500 && HEIGHT >= 300)); }
 wait_for 10 sized || report FAIL "settings window has unexpected size ${WIDTH}x${HEIGHT}"
 sleep 2 # first frames (software GL on CI is slow)
 
-# The first row's shortcut button sits near the top-left; Save is anchored bottom-right.
+# On Ubuntu/Mint settings open on Processes; Shortcuts is the second tab (elsewhere the
+# only one, and this spot is empty). Then the first row's shortcut button sits near the
+# top-left; Save is anchored bottom-right.
 record_and_save() {
     xdotool windowactivate --sync "$win"
+    xdotool mousemove --window "$win" 120 15 click 1
+    sleep 0.7
     xdotool mousemove --window "$win" 100 102 click 1
     sleep 0.7
     xdotool key ctrl+shift+y
